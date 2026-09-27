@@ -1,0 +1,146 @@
+-- Installer/updater for kenzu_cc.
+-- Recommended usage:
+-- wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/installer.lua
+
+local REPOSITORY_BASE_URL =
+    "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/"
+
+local FILES = {
+    "startup.lua",
+    "reactor.lua",
+}
+
+local installDirectory = shell.dir()
+
+local function installPath(fileName)
+    return fs.combine(installDirectory, fileName)
+end
+
+local function removeIfPresent(path)
+    if fs.exists(path) then
+        fs.delete(path)
+    end
+end
+
+local function cleanTemporaryFiles()
+    for _, fileName in ipairs(FILES) do
+        removeIfPresent(installPath(fileName) .. ".download")
+    end
+end
+
+local function download(fileName)
+    local url = REPOSITORY_BASE_URL .. fileName
+    local response, requestError, errorResponse = http.get(url, {
+        ["Cache-Control"] = "no-cache",
+    })
+
+    if not response then
+        if errorResponse then
+            errorResponse.close()
+        end
+        return false, requestError or "request failed"
+    end
+
+    local responseCode = response.getResponseCode()
+    local source = response.readAll()
+    response.close()
+
+    if responseCode ~= 200 then
+        return false, "GitHub returned HTTP " .. tostring(responseCode)
+    end
+    if not source or #source == 0 then
+        return false, "GitHub returned an empty file"
+    end
+
+    local compiled, syntaxError = load(source, "@" .. fileName)
+    if not compiled then
+        return false, "Lua syntax error: " .. tostring(syntaxError)
+    end
+
+    local temporaryPath = installPath(fileName) .. ".download"
+    removeIfPresent(temporaryPath)
+
+    local output, openError = fs.open(temporaryPath, "w")
+    if not output then
+        return false, openError or "cannot create temporary file"
+    end
+
+    output.write(source)
+    output.close()
+    return true
+end
+
+local originalExisted = {}
+local backupCreated = {}
+
+local function restoreBackups()
+    for _, fileName in ipairs(FILES) do
+        local destination = installPath(fileName)
+        local backup = destination .. ".backup"
+
+        if backupCreated[fileName] and fs.exists(backup) then
+            removeIfPresent(destination)
+            fs.move(backup, destination)
+        elseif not originalExisted[fileName] then
+            -- This file did not exist before installation.
+            removeIfPresent(destination)
+        end
+    end
+end
+
+if not http then
+    printError("HTTP API is disabled. Cannot install project files.")
+    return
+end
+
+print("Downloading kenzu_cc...")
+cleanTemporaryFiles()
+
+for _, fileName in ipairs(FILES) do
+    write("  " .. fileName .. "... ")
+    local downloaded, downloadError = download(fileName)
+
+    if not downloaded then
+        printError("FAILED")
+        printError(tostring(downloadError))
+        cleanTemporaryFiles()
+        return
+    end
+
+    print("OK")
+end
+
+local installed, installError = pcall(function()
+    for _, fileName in ipairs(FILES) do
+        local destination = installPath(fileName)
+        local backup = destination .. ".backup"
+
+        removeIfPresent(backup)
+        originalExisted[fileName] = fs.exists(destination)
+        if originalExisted[fileName] then
+            fs.move(destination, backup)
+            backupCreated[fileName] = true
+        end
+    end
+
+    for _, fileName in ipairs(FILES) do
+        local destination = installPath(fileName)
+        fs.move(destination .. ".download", destination)
+    end
+end)
+
+if not installed then
+    restoreBackups()
+    cleanTemporaryFiles()
+    printError("Installation failed: " .. tostring(installError))
+    return
+end
+
+for _, fileName in ipairs(FILES) do
+    removeIfPresent(installPath(fileName) .. ".backup")
+end
+
+term.setTextColor(colors.lime)
+print("Installation complete.")
+term.setTextColor(colors.white)
+print("Run 'startup' now, or use 'reboot' to start automatically.")
