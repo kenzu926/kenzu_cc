@@ -201,6 +201,11 @@ function StoragePanel({ storage }) {
 }
 
 export default function App() {
+  const [accessToken, setAccessToken] = useState(
+    () => window.localStorage.getItem("kenzu_cc_token") || "",
+  );
+  const [tokenDraft, setTokenDraft] = useState(accessToken);
+  const [authError, setAuthError] = useState("");
   const [activeTab, setActiveTab] = useState("reactor");
   const [systemState, setSystemState] = useState(initialState);
   const [serverOnline, setServerOnline] = useState(false);
@@ -208,6 +213,8 @@ export default function App() {
   const socketRef = useRef(null);
 
   useEffect(() => {
+    if (!accessToken) return undefined;
+
     let reconnectTimer;
     let disposed = false;
 
@@ -217,13 +224,22 @@ export default function App() {
       socketRef.current = socket;
 
       socket.addEventListener("open", () => {
-        setServerOnline(true);
-        socket.send(JSON.stringify({ type: "hello", role: "browser" }));
+        socket.send(JSON.stringify({ type: "hello", role: "browser", token: accessToken }));
       });
 
       socket.addEventListener("message", (event) => {
         const message = JSON.parse(event.data);
-        if (message.type === "state") setSystemState(message.state);
+        if (message.type === "auth_error") {
+          window.localStorage.removeItem("kenzu_cc_token");
+          setAuthError(message.message || "Invalid access token");
+          setAccessToken("");
+          socket.close();
+          return;
+        }
+        if (message.type === "state") {
+          setServerOnline(true);
+          setSystemState(message.state);
+        }
         if (message.type === "reactor_state") {
           setSystemState((current) => ({ ...current, reactor: message.reactor }));
         }
@@ -251,7 +267,23 @@ export default function App() {
       window.clearTimeout(reconnectTimer);
       socketRef.current?.close();
     };
-  }, []);
+  }, [accessToken]);
+
+  function saveToken(event) {
+    event.preventDefault();
+    const token = tokenDraft.trim();
+    if (!token) return;
+    window.localStorage.setItem("kenzu_cc_token", token);
+    setAuthError("");
+    setAccessToken(token);
+  }
+
+  function changeToken() {
+    socketRef.current?.close();
+    window.localStorage.removeItem("kenzu_cc_token");
+    setAccessToken("");
+    setServerOnline(false);
+  }
 
   function sendCommand(action, values = {}) {
     setCommandResult(null);
@@ -267,6 +299,28 @@ export default function App() {
     }));
   }
 
+  if (!accessToken) {
+    return (
+      <main className="auth-shell">
+        <form className="auth-card" onSubmit={saveToken}>
+          <div className="brand-mark">K</div>
+          <p className="eyebrow">ATM9 OPERATIONS</p>
+          <h1>Kenzu Control</h1>
+          <p>Enter the same access token that is configured on the server.</p>
+          <input
+            type="password"
+            value={tokenDraft}
+            onChange={(event) => setTokenDraft(event.target.value)}
+            placeholder="Access token"
+            autoFocus
+          />
+          <button className="button primary" type="submit">Connect</button>
+          {authError && <p className="command-result error">{authError}</p>}
+        </form>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <header>
@@ -278,6 +332,7 @@ export default function App() {
         <Indicator active={serverOnline}>
           {serverOnline ? "Server connected" : "Server offline"}
         </Indicator>
+        <button className="token-button" onClick={changeToken}>Change token</button>
       </header>
 
       <nav>

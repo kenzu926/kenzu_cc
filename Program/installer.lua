@@ -1,6 +1,6 @@
 -- Installer/updater for kenzu_cc.
 -- Recommended usage:
--- wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua
+-- wget run <installer URL> ws://213.171.18.146:22249/ws <access-token>
 
 local arguments = { ... }
 
@@ -146,13 +146,19 @@ end
 
 if arguments[1] and arguments[1] ~= "" then
     settings.set("kenzu.serverUrl", arguments[1])
-    settings.save(installPath("server.settings"))
 end
+if arguments[2] and arguments[2] ~= "" then
+    settings.set("kenzu.serverToken", arguments[2])
+end
+settings.save(installPath("server.settings"))
 
 term.setTextColor(colors.lime)
 print("Installation complete.")
 term.setTextColor(colors.white)
 if arguments[1] then
     print("WebSocket server: " .. arguments[1])
+end
+if arguments[2] then
+    print("Access token saved.")
 end
 print("Run 'startup' now, or use 'reboot' to start automatically.")

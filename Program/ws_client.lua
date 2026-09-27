@@ -5,7 +5,12 @@ Client.__index = Client
 function Client.new(role)
     settings.define("kenzu.serverUrl", {
         description = "Kenzu Control WebSocket URL",
-        default = "ws://127.0.0.1:3000/ws",
+        default = "ws://213.171.18.146:22249/ws",
+        type = "string",
+    })
+    settings.define("kenzu.serverToken", {
+        description = "Kenzu Control access token",
+        default = "",
         type = "string",
     })
     settings.load("server.settings")
@@ -13,6 +18,7 @@ function Client.new(role)
     return setmetatable({
         role = role,
         url = settings.get("kenzu.serverUrl"),
+        token = settings.get("kenzu.serverToken"),
         socket = nil,
         connecting = false,
         lastAttempt = 0,
@@ -70,6 +76,7 @@ function Client:handleEvent(event, arg1, arg2, arg3)
         self:send({
             type = "hello",
             role = self.role,
+            token = self.token,
             computerId = os.getComputerID(),
             label = os.getComputerLabel(),
         })

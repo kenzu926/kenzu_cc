@@ -1,11 +1,13 @@
 import express from "express";
+import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 22249);
+const AUTH_TOKEN = process.env.CC_AUTH_TOKEN || "";
 const OFFLINE_AFTER_MS = 10_000;
 const rootDirectory = dirname(fileURLToPath(import.meta.url));
 const distDirectory = join(rootDirectory, "dist");
@@ -37,6 +39,18 @@ const clients = new Set();
 const reactorClients = new Set();
 const storageClients = new Set();
 const storageSnapshots = new WeakMap();
+
+if (AUTH_TOKEN.length < 24) {
+  console.error("CC_AUTH_TOKEN must contain at least 24 characters.");
+  process.exit(1);
+}
+
+function tokenMatches(candidate) {
+  if (typeof candidate !== "string") return false;
+  const supplied = Buffer.from(candidate);
+  const expected = Buffer.from(AUTH_TOKEN);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
 
 function send(socket, payload) {
   if (socket.readyState !== WebSocket.OPEN) return;
@@ -75,6 +89,7 @@ function validateCommand(message) {
 
 websocketServer.on("connection", (socket) => {
   socket.role = "unknown";
+  socket.authenticated = false;
   clients.add(socket);
 
   socket.on("message", (rawMessage) => {
@@ -87,12 +102,24 @@ websocketServer.on("connection", (socket) => {
     }
 
     if (message.type === "hello") {
+      if (!tokenMatches(message.token)) {
+        send(socket, { type: "auth_error", message: "Invalid access token" });
+        socket.close(1008, "Invalid access token");
+        return;
+      }
+
+      socket.authenticated = true;
       socket.role = message.role;
       socket.computerId = message.computerId ?? null;
 
       if (socket.role === "reactor") reactorClients.add(socket);
       if (socket.role === "storage_node") storageClients.add(socket);
       if (socket.role === "browser") send(socket, { type: "state", state: publicState() });
+      return;
+    }
+
+    if (!socket.authenticated) {
+      socket.close(1008, "Authentication required");
       return;
     }
 
@@ -234,7 +261,12 @@ setInterval(() => {
   }
 }, 2_000);
 
-app.get("/api/state", (_request, response) => response.json(publicState()));
+app.get("/api/state", (request, response) => {
+  const authorization = request.get("authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  if (!tokenMatches(token)) return response.status(401).json({ error: "Unauthorized" });
+  return response.json(publicState());
+});
 app.get("/health", (_request, response) => response.json({ ok: true }));
 
 if (existsSync(join(distDirectory, "index.html"))) {
@@ -250,5 +282,5 @@ if (existsSync(join(distDirectory, "index.html"))) {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Kenzu CC server: http://localhost:${PORT}`);
-  console.log(`ComputerCraft WebSocket: ws://<PC-IP>:${PORT}/ws`);
+  console.log(`ComputerCraft WebSocket: ws://213.171.18.146:${PORT}/ws`);
 });

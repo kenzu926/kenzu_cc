@@ -1,63 +1,69 @@
 # Kenzu CC
 
-ComputerCraft control system for an ATM9 base. It connects the Mekanism
-reactor controller and the Applied Energistics storage node to a local React
-dashboard through WebSockets.
+Система управления базой ATM9: локальная автоматика реактора и ME-нода передают
+телеметрию на удалённый React-сайт через WebSocket.
 
-## Repository structure
+## Структура
 
-- `Program/` — Lua programs installed on both CC:Tweaked computers.
-- `Server/` — Node.js WebSocket server and React dashboard.
+- `Program/` — Lua-программы для компьютеров CC:Tweaked.
+- `Server/` — Node.js WebSocket-сервер и React-панель.
 
-## Start the dashboard server
+## Запуск на панельном хостинге
 
-```powershell
+Сервер слушает `0.0.0.0:22249`. В настройках хостинга назначьте приложению
+внешний TCP-порт `22249` и задайте переменную окружения `CC_AUTH_TOKEN` со
+случайным значением длиной не менее 24 символов.
+
+```bash
 cd Server
-npm install
+npm ci
 npm run build
-npm start
+CC_AUTH_TOKEN="replace-with-a-long-random-secret" npm start
 ```
 
-Open <http://localhost:3000>. For development, use `npm run dev` instead.
+Если панель задаёт переменные отдельно, добавьте там `CC_AUTH_TOKEN`, а командой
+запуска оставьте `npm start`. Сайт будет доступен по адресу
+`http://213.171.18.146:22249`.
 
-The server listens on all network interfaces. On this PC its current LAN URL
-is `http://192.168.2.10:3000`, and the ComputerCraft WebSocket URL is
-`ws://192.168.2.10:3000/ws`.
+`[http.proxy] port = 8080` в конфигурации CC:Tweaked — это порт необязательного
+исходящего HTTP-прокси Minecraft-сервера. Он не задаёт порт этой панели, поэтому
+`host` можно оставить пустым, а значение `8080` не влияет на подключение.
 
-## Allow the local server in CC:Tweaked
+## Установка и обновление CC-программ
 
-CC:Tweaked blocks private IP addresses by default. In the world's
-`serverconfig/computercraft-server.toml`, add an allow rule for the server IP
-before the `$private` deny rule, then restart Minecraft/the server:
-
-```toml
-[[http.rules]]
-    host = "192.168.2.10"
-    action = "allow"
-```
-
-If Windows asks about Node.js network access, allow it on private networks.
-
-## Install/update the CC programs
-
-Commit and push `Program/` to GitHub first. Then run this command on both the
-reactor computer and the ME computer:
+После публикации папки `Program/` в GitHub выполните на обоих компьютерах:
 
 ```text
-wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://192.168.2.10:3000/ws
+wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://213.171.18.146:22249/ws replace-with-the-same-secret
 reboot
 ```
 
-The same installer detects the computer's role automatically. The reactor
-computer starts `reactor.lua`; the ME computer starts `me_node.lua`.
+Вместо `replace-with-the-same-secret` укажите ровно тот же токен, что задан в
+`CC_AUTH_TOKEN`. Установщик сохранит адрес и токен в `server.settings`.
+На сайте этот токен потребуется ввести при первом открытии.
 
-## Dashboard features
+Установщик сам определяет роль компьютера: компьютер реактора запускает
+`reactor.lua`, а компьютер с ME Bridge — `me_node.lua`.
 
-- Reactor energy, state, temperature, damage and burn rate.
-- Start/stop thresholds with persistent settings.
-- Safety-checked reactor start and immediate SCRAM.
-- ME item list with search and live counts.
-- Online/offline state for both CC computers and the ME network.
+## Работа при падении сервера
 
-The dashboard currently has no authentication. Keep port 3000 restricted to
-the trusted local network and do not expose it directly to the internet.
+Удалённый сервер не участвует в принятии решений об автоматическом запуске и
+остановке реактора. `reactor.lua` локально читает Induction Matrix, применяет
+пороги и управляет реактором. WebSocket-клиент подключается асинхронно и при
+обрыве лишь повторяет соединение раз в 5 секунд.
+
+Поэтому при недоступном сайте продолжают работать:
+
+- включение и остановка реактора по локальным порогам;
+- кнопки на подключённом мониторе;
+- сохранённые настройки порогов;
+- локальный Rednet-обмен между компьютерами.
+
+Недоступны будут только просмотр и команды через веб-сайт. После восстановления
+сервера оба компьютера подключатся снова автоматически.
+
+## Безопасность
+
+Токен защищает панель от посторонних команд. Однако обычные `http://` и `ws://`
+не шифруют трафик. Для постоянного использования через интернет рекомендуется
+добавить домен и HTTPS reverse proxy, после чего подключать CC по `wss://`.
