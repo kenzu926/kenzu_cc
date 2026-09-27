@@ -7,7 +7,10 @@ local PROGRAMS = {
     { path = "reactor.lua", remote = "reactor.lua", title = "Reactor" },
 }
 
-local projectDirectory = fs.getDir(shell.getRunningProgram())
+-- Use the directory from which the user launched the installer. When this
+-- script is executed with `wget run`, getRunningProgram() points at wget.lua
+-- inside the read-only /rom directory rather than at this downloaded script.
+local projectDirectory = shell.dir()
 
 local function projectPath(path)
     return fs.combine(projectDirectory, path)
