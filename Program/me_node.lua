@@ -1,5 +1,6 @@
 -- Remote ME-system status and storage node for computer_1.
 local REDNET_PROTOCOL = "kenzu_cc.me_status"
+local STORAGE_REDNET_PROTOCOL = "kenzu_cc.me_storage"
 local NODE_NAME = "computer_1"
 local HEARTBEAT_INTERVAL = 2
 local STORAGE_INTERVAL = 5
@@ -99,8 +100,18 @@ local function compactItem(item)
     }
 end
 
+local function sendStorageMessage(payload)
+    -- Prefer the direct WebSocket connection when it is available, but always
+    -- mirror storage traffic over Rednet. The reactor computer can relay it to
+    -- the website when this node cannot reach the internet itself.
+    server:send(payload)
+    if modemName then
+        rednet.broadcast(payload, STORAGE_REDNET_PROTOCOL)
+    end
+end
+
 local function sendStorageSnapshot()
-    if not server:isConnected() or not meConnected or not meDevice then
+    if not meConnected or not meDevice then
         return
     end
     if not meDevice.listItems then
@@ -122,7 +133,7 @@ local function sendStorageSnapshot()
     end)
 
     local snapshotId = tostring(os.epoch("utc"))
-    server:send({
+    sendStorageMessage({
         type = "storage_begin",
         snapshotId = snapshotId,
         total = #compactItems,
@@ -134,14 +145,14 @@ local function sendStorageSnapshot()
         for itemIndex = index, lastIndex do
             chunk[#chunk + 1] = compactItems[itemIndex]
         end
-        server:send({
+        sendStorageMessage({
             type = "storage_chunk",
             snapshotId = snapshotId,
             items = chunk,
         })
     end
 
-    server:send({
+    sendStorageMessage({
         type = "storage_end",
         snapshotId = snapshotId,
     })
@@ -155,7 +166,9 @@ local function drawStatus()
     print("Rednet ID: " .. os.getComputerID())
     print("Modem: " .. tostring(modemName or "NOT FOUND"))
     print("ME System: " .. (meConnected and "CONNECTED" or "DISCONNECTED"))
-    print("Web server: " .. (server:isConnected() and "CONNECTED" or "OFFLINE"))
+    local uplink = server:isConnected() and "DIRECT"
+        or (modemName and "REDNET RELAY" or "OFFLINE")
+    print("Web uplink: " .. uplink)
     print("Details: " .. meDetails)
     if server.lastError then
         print("Web error: " .. server.lastError)

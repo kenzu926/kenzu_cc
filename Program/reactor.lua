@@ -3,6 +3,7 @@ local MATRIX_NAME = "inductionPort_0"
 local REACTOR_NAME = "fissionReactorLogicAdapter_0"
 local MONITOR_NAME = "monitor_0"
 local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
+local ME_STORAGE_PROTOCOL = "kenzu_cc.me_storage"
 local REMOTE_NODE_NAME = "computer_1"
 local REMOTE_TIMEOUT = 7 * 1000
 
@@ -409,7 +410,21 @@ while true do
             lastRemoteHeartbeat = os.epoch("utc")
             remoteMEConnected = payload.meConnected == true
             remoteComputerId = arg1
+            server:send({
+                type = "storage_status",
+                connected = remoteMEConnected,
+                details = payload.details or "Connected through Rednet relay",
+                computerId = arg1,
+            })
             drawScreen()
+        end
+    elseif event == "rednet_message" and arg3 == ME_STORAGE_PROTOCOL then
+        local payload = arg2
+        if type(payload) == "table"
+            and (payload.type == "storage_begin"
+                or payload.type == "storage_chunk"
+                or payload.type == "storage_end") then
+            server:send(payload)
         end
     end
 end

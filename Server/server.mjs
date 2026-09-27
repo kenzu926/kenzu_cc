@@ -135,10 +135,12 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "storage_status" && socket.role === "storage_node") {
+    const isStorageSource = socket.role === "storage_node" || socket.role === "reactor";
+
+    if (message.type === "storage_status" && isStorageSource) {
       state.storage.online = true;
       state.storage.lastSeen = Date.now();
-      state.storage.computerId = socket.computerId;
+      state.storage.computerId = message.computerId ?? socket.computerId;
       state.storage.connected = message.connected === true;
       state.storage.details = message.details || "";
       broadcastToBrowsers({
@@ -154,7 +156,7 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "storage_begin" && socket.role === "storage_node") {
+    if (message.type === "storage_begin" && isStorageSource) {
       storageSnapshots.set(socket, {
         id: message.snapshotId,
         items: [],
@@ -162,7 +164,7 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "storage_chunk" && socket.role === "storage_node") {
+    if (message.type === "storage_chunk" && isStorageSource) {
       const snapshot = storageSnapshots.get(socket);
       if (snapshot?.id === message.snapshotId && Array.isArray(message.items)) {
         snapshot.items.push(...message.items);
@@ -170,7 +172,7 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "storage_end" && socket.role === "storage_node") {
+    if (message.type === "storage_end" && isStorageSource) {
       const snapshot = storageSnapshots.get(socket);
       if (snapshot?.id !== message.snapshotId) return;
 
