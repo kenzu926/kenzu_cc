@@ -64,6 +64,7 @@ nav button.active { color: #e8edf7; background: #203041; box-shadow: inset 0 0 0
 .storage-heading { align-items: center; }
 .status-stack { display: flex; gap: 20px; }
 .storage-summary { display: grid; grid-template-columns: 180px 180px minmax(240px, 1fr); gap: 12px; margin: 28px 0 20px; }
+.storage-details { margin: -8px 0 20px; color: #718095; font-size: 13px; }
 .search-box { display: flex; align-items: center; gap: 10px; padding: 0 14px; border: 1px solid #253244; border-radius: 12px; background: #0b111a; }
 .search-box span { color: #68d9f6; font-size: 24px; }
 .search-box input { width: 100%; border: 0; outline: 0; color: #e8edf7; background: transparent; }

@@ -181,6 +181,8 @@ function StoragePanel({ storage }) {
         </div>
       </div>
 
+      {storage.details && <p className="storage-details">{storage.details}</p>}
+
       <div className="item-table">
         <div className="item-row table-header">
           <span>Item</span><span>Registry name</span><span>Count</span>

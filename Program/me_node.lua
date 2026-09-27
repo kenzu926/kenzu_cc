@@ -69,6 +69,7 @@ end
 local meConnected = false
 local meDetails = "Waiting for ME system"
 local meDevice = nil
+local storageDetails = "Waiting for first item scan"
 
 local function sendStatus()
     meConnected, meDetails, meDevice = getMEStatus()
@@ -80,14 +81,14 @@ local function sendStatus()
             node = NODE_NAME,
             computerId = os.getComputerID(),
             meConnected = meConnected,
-            details = meDetails,
+            details = meDetails .. " | " .. storageDetails,
         }, REDNET_PROTOCOL)
     end
 
     server:send({
         type = "storage_status",
         connected = meConnected,
-        details = meDetails,
+        details = meDetails .. " | " .. storageDetails,
     })
 end
 
@@ -112,15 +113,28 @@ end
 
 local function sendStorageSnapshot()
     if not meConnected or not meDevice then
-        return
-    end
-    if not meDevice.listItems then
+        storageDetails = "Item scan waiting for ME connection"
         return
     end
 
-    local ok, items, listError = pcall(meDevice.listItems)
+    local listMethod = meDevice.listItems
+    local methodArguments = {}
+    if not listMethod and meDevice.getItems then
+        listMethod = meDevice.getItems
+        -- Advanced Peripherals 0.8 requires an empty filter to return all items.
+        methodArguments = { {} }
+    end
+
+    if not listMethod then
+        storageDetails = "No listItems/getItems method"
+        return
+    end
+
+    storageDetails = "Reading ME items..."
+    local ok, items, listError = pcall(listMethod, table.unpack(methodArguments))
     if not ok or type(items) ~= "table" then
-        meDetails = tostring(listError or items or "Unable to read ME items")
+        storageDetails = "Item scan error: "
+            .. tostring(listError or items or "Unable to read ME items")
         return
     end
 
@@ -156,6 +170,7 @@ local function sendStorageSnapshot()
         type = "storage_end",
         snapshotId = snapshotId,
     })
+    storageDetails = "Sent " .. #compactItems .. " item types"
 end
 
 local function drawStatus()
@@ -170,6 +185,7 @@ local function drawStatus()
         or (modemName and "REDNET RELAY" or "OFFLINE")
     print("Web uplink: " .. uplink)
     print("Details: " .. meDetails)
+    print("Storage: " .. storageDetails)
     if server.lastError then
         print("Web error: " .. server.lastError)
     end
