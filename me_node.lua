@@ -14,34 +14,46 @@ local function findWirelessModem()
     end
 end
 
-local function findMEBridge()
-    return peripheral.find("meBridge") or peripheral.find("me_bridge")
+local function findMEPeripheral()
+    local bridge = peripheral.find("meBridge") or peripheral.find("me_bridge")
+    if bridge then
+        return bridge, "ME Bridge", true
+    end
+
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:match("^ae2:controller") then
+            return peripheral.wrap(name), name, false
+        end
+    end
 end
 
 local function getMEStatus()
-    local bridge = findMEBridge()
-    if not bridge then
-        return false, "ME Bridge not found"
+    local device, deviceName, isBridge = findMEPeripheral()
+    if not device then
+        return false, "ME peripheral not found"
     end
 
-    if bridge.isConnected then
-        local ok, connected = pcall(bridge.isConnected)
+    if isBridge and device.isConnected then
+        local ok, connected = pcall(device.isConnected)
         if not ok then
             return false, tostring(connected)
         end
-        return connected == true, connected and "Connected" or "ME network offline"
+        return connected == true,
+            connected and "Connected via ME Bridge" or "ME network offline"
     end
 
     -- Compatibility fallback for older Advanced Peripherals versions.
-    if bridge.getTotalItemStorage then
-        local ok, storage = pcall(bridge.getTotalItemStorage)
+    if isBridge and device.getTotalItemStorage then
+        local ok, storage = pcall(device.getTotalItemStorage)
         if ok and storage ~= nil then
-            return true, "Connected"
+            return true, "Connected via ME Bridge"
         end
         return false, tostring(storage or "ME network offline")
     end
 
-    return false, "Unsupported ME Bridge"
+    -- A directly attached AE2 controller has no Advanced Peripherals
+    -- isConnected() method. Its presence confirms the wired connection.
+    return peripheral.isPresent(deviceName), "Connected via " .. deviceName
 end
 
 local modemName = findWirelessModem()
@@ -67,9 +79,7 @@ while true do
     print("Rednet ID: " .. os.getComputerID())
     print("Modem: " .. modemName)
     print("ME System: " .. (meConnected and "CONNECTED" or "DISCONNECTED"))
-    if not meConnected then
-        print("Reason: " .. details)
-    end
+    print("Details: " .. details)
 
     sleep(HEARTBEAT_INTERVAL)
 end

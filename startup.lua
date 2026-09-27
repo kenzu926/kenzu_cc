@@ -1,21 +1,27 @@
 -- Project service launcher.
 -- installer.lua is responsible for downloading and updating these files.
+local function isReactorComputer()
+    return peripheral.find("inductionPort") ~= nil
+        or peripheral.find("fissionReactorLogicAdapter") ~= nil
+end
+
+local function reactorIsReady()
+    return peripheral.find("inductionPort") ~= nil
+        and peripheral.find("fissionReactorLogicAdapter") ~= nil
+        and peripheral.find("monitor") ~= nil
+end
+
 local PROGRAMS = {
     {
         path = "reactor.lua",
         title = "Reactor",
-        shouldRun = function()
-            return peripheral.find("inductionPort")
-                and peripheral.find("fissionReactorLogicAdapter")
-                and peripheral.find("monitor")
-        end,
+        shouldRun = reactorIsReady,
     },
     {
         path = "me_node.lua",
         title = "ME Node",
         shouldRun = function()
-            return peripheral.find("meBridge")
-                or peripheral.find("me_bridge")
+            return not isReactorComputer()
         end,
     },
 }
