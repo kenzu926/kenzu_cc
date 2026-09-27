@@ -1,12 +1,15 @@
 -- Installer/updater for kenzu_cc.
 -- Recommended usage:
--- wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/installer.lua
+-- wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua
+
+local arguments = { ... }
 
 local REPOSITORY_BASE_URL =
-    "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/"
+    "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/"
 
 local FILES = {
     "startup.lua",
+    "ws_client.lua",
     "reactor.lua",
     "me_node.lua",
 }
@@ -141,7 +144,15 @@ for _, fileName in ipairs(FILES) do
     removeIfPresent(installPath(fileName) .. ".backup")
 end
 
+if arguments[1] and arguments[1] ~= "" then
+    settings.set("kenzu.serverUrl", arguments[1])
+    settings.save(installPath("server.settings"))
+end
+
 term.setTextColor(colors.lime)
 print("Installation complete.")
 term.setTextColor(colors.white)
+if arguments[1] then
+    print("WebSocket server: " .. arguments[1])
+end
 print("Run 'startup' now, or use 'reboot' to start automatically.")

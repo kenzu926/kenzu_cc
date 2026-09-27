@@ -6,6 +6,10 @@ local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
 local REMOTE_NODE_NAME = "computer_1"
 local REMOTE_TIMEOUT = 7 * 1000
 
+local scriptDirectory = fs.getDir(shell.getRunningProgram())
+local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
+local server = WebSocketClient.new("reactor")
+
 local SETTINGS_FILE = "reactor.settings"
 local CHECK_INTERVAL = 1
 
@@ -175,7 +179,12 @@ local function drawScreen()
         writeCentered(25, "Rednet ID: " .. remoteComputerId, colors.lightGray)
     end
 
-    writeCentered(math.min(height, 27), message, colors.lightGray)
+    writeCentered(
+        27,
+        "Web: " .. (server:isConnected() and "ONLINE" or "OFFLINE"),
+        server:isConnected() and colors.lime or colors.red
+    )
+    writeCentered(math.min(height, 29), message, colors.lightGray)
 
     monitor.setBackgroundColor(colors.black)
     monitor.setTextColor(colors.white)
@@ -203,6 +212,108 @@ local function updateController()
         stoppedForHighEnergy = false
         message = "Started: battery low"
     end
+end
+
+local function safeNumber(method, fallback)
+    if not method then
+        return fallback or 0
+    end
+    local ok, value = pcall(method)
+    if not ok then
+        return fallback or 0
+    end
+    return tonumber(value) or fallback or 0
+end
+
+local function sendReactorStatus()
+    server:send({
+        type = "reactor_status",
+        data = {
+            energyPercent = energy * 100,
+            running = reactorRunning,
+            startPercent = startPercent,
+            stopPercent = stopPercent,
+            temperature = safeNumber(reactor.getTemperature),
+            damage = safeNumber(reactor.getDamagePercent),
+            coolantPercent = safeNumber(reactor.getCoolantFilledPercentage) * 100,
+            wastePercent = safeNumber(reactor.getWasteFilledPercentage) * 100,
+            burnRate = safeNumber(reactor.getBurnRate),
+            actualBurnRate = safeNumber(reactor.getActualBurnRate),
+            remoteComputerOnline = isRemoteOnline(),
+            remoteMEConnected = remoteMEConnected,
+        },
+    })
+end
+
+local function sendCommandResult(command, ok, resultMessage)
+    server:send({
+        type = "command_result",
+        requestId = command.requestId,
+        ok = ok,
+        message = resultMessage,
+    })
+end
+
+local function handleServerCommand(command)
+    if command.action == "set_thresholds" then
+        local newStart = tonumber(command.startPercent)
+        local newStop = tonumber(command.stopPercent)
+
+        if not newStart or not newStop
+            or newStart < 0 or newStop > 100 or newStart >= newStop then
+            sendCommandResult(command, false, "Invalid threshold values")
+            return
+        end
+
+        startPercent = math.floor(newStart)
+        stopPercent = math.floor(newStop)
+        saveThresholds()
+        message = "Thresholds updated from web"
+        sendCommandResult(command, true, "Thresholds saved")
+        return
+    end
+
+    if command.action == "reactor_scram" then
+        local ok, commandError = pcall(reactor.scram)
+        if ok then
+            reactorRunning = false
+            stoppedForHighEnergy = false
+            message = "SCRAM from web"
+            sendCommandResult(command, true, "Reactor stopped")
+        else
+            sendCommandResult(command, false, tostring(commandError))
+        end
+        return
+    end
+
+    if command.action == "reactor_start" then
+        local damage = safeNumber(reactor.getDamagePercent, 100)
+        local coolant = safeNumber(reactor.getCoolantFilledPercentage, 0)
+        local waste = safeNumber(reactor.getWasteFilledPercentage, 1)
+        local forceDisabled = false
+        if reactor.isForceDisabled then
+            local forceCheckOk, forceCheckValue = pcall(reactor.isForceDisabled)
+            forceDisabled = not forceCheckOk or forceCheckValue == true
+        end
+
+        if forceDisabled or damage >= 100 or coolant <= 0.05 or waste >= 0.90 then
+            sendCommandResult(command, false, "Safety check blocked reactor start")
+            return
+        end
+
+        local ok, commandError = pcall(reactor.activate)
+        if ok then
+            reactorRunning = true
+            stoppedForHighEnergy = false
+            message = "Started from web"
+            sendCommandResult(command, true, "Reactor started")
+        else
+            sendCommandResult(command, false, tostring(commandError))
+        end
+        return
+    end
+
+    sendCommandResult(command, false, "Unknown reactor command")
 end
 
 local function isInside(button, x, y)
@@ -255,15 +366,35 @@ end
 
 saveThresholds()
 updateController()
+server:connect()
 drawScreen()
 
 local timer = os.startTimer(CHECK_INTERVAL)
 
 while true do
     local event, arg1, arg2, arg3 = os.pullEvent()
+    local serverEvent, serverMessage = server:handleEvent(event, arg1, arg2, arg3)
+
+    if serverEvent == "connected" then
+        message = "Web server connected"
+        sendReactorStatus()
+        drawScreen()
+    elseif serverEvent == "disconnected" then
+        message = "Web server disconnected"
+        drawScreen()
+    elseif serverEvent == "message"
+        and type(serverMessage) == "table"
+        and serverMessage.type == "command" then
+        handleServerCommand(serverMessage)
+        updateController()
+        sendReactorStatus()
+        drawScreen()
+    end
 
     if event == "timer" and arg1 == timer then
+        server:connect()
         updateController()
+        sendReactorStatus()
         drawScreen()
         timer = os.startTimer(CHECK_INTERVAL)
     elseif event == "monitor_touch" and arg1 == MONITOR_NAME then
