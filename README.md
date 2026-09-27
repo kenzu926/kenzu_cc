@@ -47,17 +47,16 @@ New-NetFirewallRule -DisplayName "Kenzu CC Web" -Direction Inbound -Protocol TCP
 После публикации папки `Program/` в GitHub выполните на обоих компьютерах:
 
 ```text
-wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://YOUR_PUBLIC_IP:3000/ws replace-with-the-same-secret
+wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://93.170.246.220:3000/ws replace-with-the-same-secret
 reboot
 ```
 
-Замените `YOUR_PUBLIC_IP` на белый IP домашнего подключения, а
-`replace-with-the-same-secret` — на тот же токен, который задан в
-`CC_AUTH_TOKEN`. Установщик сохранит параметры в `server.settings`. На сайте
-этот токен потребуется ввести при первом открытии.
+Вместо `replace-with-the-same-secret` укажите тот же токен, который задан в
+`CC_AUTH_TOKEN`. Установщик сохранит адрес `ws://93.170.246.220:3000/ws` и токен
+в `server.settings`. На сайте этот токен потребуется ввести при первом открытии.
 
 Проверяйте внешний доступ с телефона через мобильную сеть, открыв
-`http://YOUR_PUBLIC_IP:3000/health`. Ожидаемый ответ: `{"ok":true}`.
+`http://93.170.246.220:3000/health`. Ожидаемый ответ: `{"ok":true}`.
 
 Установщик сам определяет роль компьютера: компьютер реактора запускает
 `reactor.lua`, а компьютер с ME Bridge — `me_node.lua`.

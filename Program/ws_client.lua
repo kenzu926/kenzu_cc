@@ -5,7 +5,7 @@ Client.__index = Client
 function Client.new(role)
     settings.define("kenzu.serverUrl", {
         description = "Kenzu Control WebSocket URL",
-        default = "ws://127.0.0.1:3000/ws",
+        default = "ws://93.170.246.220:3000/ws",
         type = "string",
     })
     settings.define("kenzu.serverToken", {
