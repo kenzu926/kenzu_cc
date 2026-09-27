@@ -1,6 +1,6 @@
 -- Installer/updater for kenzu_cc.
 -- Recommended usage:
--- wget run <installer URL> ws://213.171.18.146:22249/ws <access-token>
+-- wget run <installer URL> ws://<your-public-ip>:3000/ws <access-token>
 
 local arguments = { ... }
 

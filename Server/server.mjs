@@ -6,7 +6,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 
-const PORT = Number(process.env.PORT || 22249);
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || "0.0.0.0";
 const AUTH_TOKEN = process.env.CC_AUTH_TOKEN || "";
 const OFFLINE_AFTER_MS = 10_000;
 const rootDirectory = dirname(fileURLToPath(import.meta.url));
@@ -280,7 +281,8 @@ if (existsSync(join(distDirectory, "index.html"))) {
   });
 }
 
-server.listen(PORT, "0.0.0.0", () => {
+server.listen(PORT, HOST, () => {
+  console.log(`Listening on all interfaces: ${HOST}:${PORT}`);
   console.log(`Kenzu CC server: http://localhost:${PORT}`);
-  console.log(`ComputerCraft WebSocket: ws://213.171.18.146:${PORT}/ws`);
+  console.log(`ComputerCraft WebSocket: ws://<YOUR-PUBLIC-IP>:${PORT}/ws`);
 });

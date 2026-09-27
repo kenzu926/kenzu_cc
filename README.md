@@ -8,39 +8,56 @@
 - `Program/` — Lua-программы для компьютеров CC:Tweaked.
 - `Server/` — Node.js WebSocket-сервер и React-панель.
 
-## Запуск на панельном хостинге
+## Запуск на домашнем ПК
 
-Сервер слушает `0.0.0.0:22249`. В настройках хостинга назначьте приложению
-внешний TCP-порт `22249` и задайте переменную окружения `CC_AUTH_TOKEN` со
-случайным значением длиной не менее 24 символов.
+Сервер сайта запускается на домашнем ПК и слушает `0.0.0.0:3000`. Компьютеры
+CC:Tweaked сами устанавливают исходящее WebSocket-подключение к белому IP
+домашнего ПК. Node.js на Minecraft-хостинге не требуется.
 
-```bash
+В PowerShell задайте токен длиной не менее 24 символов и запустите сервер:
+
+```powershell
 cd Server
 npm ci
 npm run build
-CC_AUTH_TOKEN="replace-with-a-long-random-secret" npm start
+$env:CC_AUTH_TOKEN="replace-with-a-long-random-secret"
+npm start
 ```
 
-Если панель задаёт переменные отдельно, добавьте там `CC_AUTH_TOKEN`, а командой
-запуска оставьте `npm start`. Сайт будет доступен по адресу
-`http://213.171.18.146:22249`.
+Локально сайт доступен по адресу `http://localhost:3000`. Чтобы CC-компьютеры
+подключились через интернет, разрешите входящий TCP-порт `3000` в Windows
+Firewall и пробросьте TCP `3000` на этот ПК в настройках роутера.
 
-`[http.proxy] port = 8080` в конфигурации CC:Tweaked — это порт необязательного
-исходящего HTTP-прокси Minecraft-сервера. Он не задаёт порт этой панели, поэтому
-`host` можно оставить пустым, а значение `8080` не влияет на подключение.
+Сервер привязан к `0.0.0.0`, поэтому не ограничен `localhost`: открыть сайт
+можно через любой IP или домен, который ведёт на этот ПК. Авторизация по токену
+при этом остаётся обязательной.
+
+Команда для Windows Firewall (PowerShell от имени администратора):
+
+```powershell
+New-NetFirewallRule -DisplayName "Kenzu CC Web" -Direction Inbound -Protocol TCP -LocalPort 3000 -Action Allow
+```
+
+Выделять входящий порт в панели minecraft-hosting.net не нужно. Параметр
+`[http.proxy] port = 8080` также не относится к сайту и может остаться без
+изменений.
 
 ## Установка и обновление CC-программ
 
 После публикации папки `Program/` в GitHub выполните на обоих компьютерах:
 
 ```text
-wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://213.171.18.146:22249/ws replace-with-the-same-secret
+wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://YOUR_PUBLIC_IP:3000/ws replace-with-the-same-secret
 reboot
 ```
 
-Вместо `replace-with-the-same-secret` укажите ровно тот же токен, что задан в
-`CC_AUTH_TOKEN`. Установщик сохранит адрес и токен в `server.settings`.
-На сайте этот токен потребуется ввести при первом открытии.
+Замените `YOUR_PUBLIC_IP` на белый IP домашнего подключения, а
+`replace-with-the-same-secret` — на тот же токен, который задан в
+`CC_AUTH_TOKEN`. Установщик сохранит параметры в `server.settings`. На сайте
+этот токен потребуется ввести при первом открытии.
+
+Проверяйте внешний доступ с телефона через мобильную сеть, открыв
+`http://YOUR_PUBLIC_IP:3000/health`. Ожидаемый ответ: `{"ok":true}`.
 
 Установщик сам определяет роль компьютера: компьютер реактора запускает
 `reactor.lua`, а компьютер с ME Bridge — `me_node.lua`.
