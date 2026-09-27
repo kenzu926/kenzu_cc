@@ -2,6 +2,9 @@
 local MATRIX_NAME = "inductionPort_0"
 local REACTOR_NAME = "fissionReactorLogicAdapter_0"
 local MONITOR_NAME = "monitor_0"
+local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
+local REMOTE_NODE_NAME = "computer_1"
+local REMOTE_TIMEOUT = 7 * 1000
 
 local SETTINGS_FILE = "reactor.settings"
 local CHECK_INTERVAL = 1
@@ -44,11 +47,32 @@ local monitor = assert(
 
 monitor.setTextScale(0.5)
 
+local function findWirelessModem()
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.hasType(name, "modem") then
+            local modem = peripheral.wrap(name)
+            if modem.isWireless and modem.isWireless() then
+                return name
+            end
+        end
+    end
+end
+
+local wirelessModemName = findWirelessModem()
+if wirelessModemName then
+    rednet.open(wirelessModemName)
+end
+
 local width, height = monitor.getSize()
 local energy = 0
 local reactorRunning = false
 local stoppedForHighEnergy = false
-local message = "Controller started"
+local message = wirelessModemName
+    and "Controller started"
+    or "Wireless modem not found"
+local lastRemoteHeartbeat = nil
+local remoteMEConnected = false
+local remoteComputerId = nil
 
 local buttons = {}
 
@@ -99,6 +123,11 @@ local function drawBar(y, fraction)
     end
 end
 
+local function isRemoteOnline()
+    return lastRemoteHeartbeat ~= nil
+        and os.epoch("utc") - lastRemoteHeartbeat <= REMOTE_TIMEOUT
+end
+
 local function drawScreen()
     width, height = monitor.getSize()
     buttons = {}
@@ -127,7 +156,26 @@ local function drawScreen()
     drawButton("stopMinus", minusX1, 16, minusX2, 18, "-", colors.red)
     drawButton("stopPlus", plusX1, 16, plusX2, 18, "+", colors.green)
 
-    writeCentered(math.min(height, 21), message, colors.lightGray)
+    local remoteOnline = isRemoteOnline()
+    writeCentered(
+        21,
+        "Computer 1: " .. (remoteOnline and "ONLINE" or "OFFLINE"),
+        remoteOnline and colors.lime or colors.red
+    )
+
+    local meText = "UNKNOWN"
+    local meColor = colors.orange
+    if remoteOnline then
+        meText = remoteMEConnected and "CONNECTED" or "DISCONNECTED"
+        meColor = remoteMEConnected and colors.lime or colors.red
+    end
+    writeCentered(23, "ME System: " .. meText, meColor)
+
+    if remoteOnline and remoteComputerId then
+        writeCentered(25, "Rednet ID: " .. remoteComputerId, colors.lightGray)
+    end
+
+    writeCentered(math.min(height, 27), message, colors.lightGray)
 
     monitor.setBackgroundColor(colors.black)
     monitor.setTextColor(colors.white)
@@ -222,5 +270,15 @@ while true do
         handleTouch(arg2, arg3)
     elseif event == "monitor_resize" and arg1 == MONITOR_NAME then
         drawScreen()
+    elseif event == "rednet_message" and arg3 == ME_STATUS_PROTOCOL then
+        local payload = arg2
+        if type(payload) == "table"
+            and payload.role == "me_node"
+            and payload.node == REMOTE_NODE_NAME then
+            lastRemoteHeartbeat = os.epoch("utc")
+            remoteMEConnected = payload.meConnected == true
+            remoteComputerId = arg1
+            drawScreen()
+        end
     end
 end
