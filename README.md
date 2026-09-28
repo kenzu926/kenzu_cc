@@ -110,5 +110,3 @@ update
 Токен защищает панель от посторонних команд. Однако обычные `http://` и `ws://`
 не шифруют трафик. Для постоянного использования через интернет рекомендуется
 добавить домен и HTTPS reverse proxy, после чего подключать CC по `wss://`.
-
-wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://93.170.246.220:3000/ws aAC2YrToOm3ETGGUzuKT7zAl

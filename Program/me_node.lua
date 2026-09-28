@@ -25,6 +25,20 @@ local function findWirelessModem()
 end
 
 local function findMEPeripheral()
+    -- Prefer the server-side Kenzu CC Bridge. It exposes real AE2 cell usage,
+    -- while some ME Bridge versions only return an estimated aggregate value.
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:match("^ae2:controller") then
+            local controller = peripheral.wrap(name)
+            local ok, version = pcall(function()
+                return controller.getKenzuApiVersion()
+            end)
+            if ok and version then
+                return controller, "Kenzu AE2 API " .. tostring(version), true
+            end
+        end
+    end
+
     local bridge = peripheral.find("meBridge") or peripheral.find("me_bridge")
     if bridge then
         return bridge, "ME Bridge", true
@@ -136,14 +150,26 @@ local function refreshStorageMetrics()
         storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
         return
     end
-    local total = tonumber(safeCall(meDevice, "getMaxItemStorage", nil))
-        or tonumber(safeCall(meDevice, "getTotalItemStorage", 0)) or 0
-    local used = tonumber(safeCall(meDevice, "getUsedItemStorage", 0)) or 0
-    local available = tonumber(safeCall(meDevice, "getAvailableItemStorage", nil))
-        or math.max(0, total - used)
     local cells = {}
-    appendCells(cells, safeCall(meDevice, "getCells", nil))
-    storageCellSource = "getCells"
+    local snapshot = safeCall(meDevice, "getStorageStats", nil)
+    local total, used, available
+    if type(snapshot) == "table" then
+        total = tonumber(snapshot.total) or 0
+        used = tonumber(snapshot.used) or 0
+        available = tonumber(snapshot.available) or math.max(0, total - used)
+        appendCells(cells, snapshot.cells)
+        storageCellSource = "Kenzu CC Bridge"
+    else
+        total = tonumber(safeCall(meDevice, "getMaxItemStorage", nil))
+            or tonumber(safeCall(meDevice, "getTotalItemStorage", 0)) or 0
+        used = tonumber(safeCall(meDevice, "getUsedItemStorage", 0)) or 0
+        available = tonumber(safeCall(meDevice, "getAvailableItemStorage", nil))
+            or math.max(0, total - used)
+    end
+    if #cells == 0 then
+        appendCells(cells, safeCall(meDevice, "getCells", nil))
+        storageCellSource = "getCells"
+    end
     if #cells == 0 then
         appendCells(cells, safeCall(meDevice, "listCells", nil))
         storageCellSource = "listCells"
