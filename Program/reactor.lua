@@ -39,6 +39,11 @@ settings.define("reactor.safetyFuelEnabled", { default = true, type = "boolean" 
 settings.define("reactor.steamStopPercent", { default = 95, type = "number" })
 settings.define("reactor.waterStopPercent", { default = 10, type = "number" })
 settings.define("reactor.fuelStopPercent", { default = 5, type = "number" })
+settings.define("reactor.manualHold", {
+    description = "Keep the reactor stopped after a manual SCRAM",
+    default = false,
+    type = "boolean",
+})
 
 settings.load(SETTINGS_FILE)
 
@@ -51,6 +56,7 @@ local safetyFuelEnabled = settings.get("reactor.safetyFuelEnabled")
 local steamStopPercent = math.max(1, math.min(100, settings.get("reactor.steamStopPercent")))
 local waterStopPercent = math.max(0, math.min(99, settings.get("reactor.waterStopPercent")))
 local fuelStopPercent = math.max(0, math.min(99, settings.get("reactor.fuelStopPercent")))
+local manualHold = settings.get("reactor.manualHold") == true
 
 -- Keep saved values valid and leave at least 1% between the thresholds.
 startPercent = math.max(0, math.min(99, startPercent))
@@ -113,6 +119,7 @@ local function saveThresholds()
     settings.set("reactor.steamStopPercent", steamStopPercent)
     settings.set("reactor.waterStopPercent", waterStopPercent)
     settings.set("reactor.fuelStopPercent", fuelStopPercent)
+    settings.set("reactor.manualHold", manualHold)
     settings.save(SETTINGS_FILE)
 end
 
@@ -246,11 +253,13 @@ local function updateController()
     energy = matrix.getEnergyFilledPercentage()
     local actualRunning = reactor.getStatus()
 
-    -- If the state changed outside this program, do not treat it as an
-    -- automatic high-energy stop. This avoids undoing a manual/safety stop.
+    -- A state change made directly in-game is a manual command. Remember a
+    -- manual stop so the low-energy automation cannot immediately undo it.
     if actualRunning ~= reactorRunning then
+        manualHold = not actualRunning
         stoppedForSafety = false
         safetyStopReason = nil
+        saveThresholds()
     end
     reactorRunning = actualRunning
 
@@ -258,12 +267,18 @@ local function updateController()
     if stopReason and reactorRunning then
         reactor.scram()
         reactorRunning = false
+        manualHold = false
         stoppedForSafety = true
         safetyStopReason = stopReason
         message = "Safety stop: " .. stopReason
     elseif not stopReason and not reactorRunning
-        and (stoppedForSafety
-            or (safetyEnergyEnabled and energy <= startPercent / 100)) then
+        and not manualHold
+        and ((stoppedForSafety
+                and (safetyStopReason ~= "battery threshold"
+                    or energy <= startPercent / 100))
+            or (not stoppedForSafety
+                and safetyEnergyEnabled
+                and energy <= startPercent / 100)) then
         reactor.activate()
         reactorRunning = true
         stoppedForSafety = false
@@ -354,6 +369,7 @@ local function sendReactorStatus()
                 fuelStopPercent = fuelStopPercent,
                 stopped = stoppedForSafety,
                 reason = safetyStopReason,
+                manualHold = manualHold,
             },
             remoteComputerOnline = isRemoteOnline(),
             remoteMEConnected = remoteMEConnected,
@@ -367,6 +383,7 @@ local function consoleStatus()
         "Matrix: " .. MATRIX_NAME,
         ("Energy: %.2f%%"):format(energy * 100),
         "Reactor: " .. (reactorRunning and "ONLINE" or "SCRAMMED"),
+        "Manual hold: " .. (manualHold and "ON" or "OFF"),
         ("Thresholds: %d%% / %d%%"):format(startPercent, stopPercent),
         "ME node: " .. (isRemoteOnline() and "ONLINE" or "OFFLINE"),
         "Web: " .. (server:isConnected() and "CONNECTED" or "OFFLINE"),
@@ -444,6 +461,8 @@ local function handleServerCommand(command)
             reactorRunning = false
             stoppedForSafety = false
             safetyStopReason = nil
+            manualHold = true
+            saveThresholds()
             message = "SCRAM from web"
             sendCommandResult(command, true, "Reactor stopped")
         else
@@ -472,6 +491,8 @@ local function handleServerCommand(command)
             reactorRunning = true
             stoppedForSafety = false
             safetyStopReason = nil
+            manualHold = false
+            saveThresholds()
             message = "Started from web"
             sendCommandResult(command, true, "Reactor started")
         else

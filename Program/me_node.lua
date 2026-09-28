@@ -75,6 +75,7 @@ local meDetails = "Waiting for ME system"
 local meDevice = nil
 local storageDetails = "Waiting for first item scan"
 local storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
+local storageCellSource = "none"
 
 local function safeCall(device, methodName, fallback)
     local method = device and device[methodName]
@@ -92,27 +93,22 @@ local function firstNumber(source, names)
 end
 
 local function cellName(cell, index)
-    local item = cell and (cell.item or cell.name)
+    local item = cell and (cell.item or cell.name or cell.id)
     if type(item) == "table" then
-        item = item.displayName or item.name or item.id
+        item = item.displayName or item.name or item.id or item.registryName
     end
     return tostring(item or ("ME storage cell " .. index))
 end
 
-local function refreshStorageMetrics()
-    if not meConnected or not meDevice then
-        storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
-        return
-    end
-    local cells = {}
-    local rawCells = safeCall(meDevice, "getCells", nil)
-    if type(rawCells) ~= "table" then
-        rawCells = safeCall(meDevice, "listCells", {})
-    end
-    if type(rawCells) == "table" then
-        for index, cell in pairs(rawCells) do
+local function appendCells(target, rawCells)
+    if type(rawCells) ~= "table" then return end
+    for index, cell in pairs(rawCells) do
+        if type(cell) == "table" and type(cell.cells) == "table" then
+            appendCells(target, cell.cells)
+        elseif type(cell) == "table" then
             local totalBytes = firstNumber(cell, {
-                "totalBytes", "capacity", "maxBytes", "bytesTotal",
+                -- AP 0.8 uses bytes; AP 0.7 uses totalBytes.
+                "bytes", "capacity", "maxBytes", "bytesTotal", "totalBytes",
             }) or 0
             local usedBytes = firstNumber(cell, {
                 "usedBytes", "used", "bytesUsed",
@@ -123,9 +119,9 @@ local function refreshStorageMetrics()
             if usedBytes == nil and availableBytes ~= nil and totalBytes > 0 then
                 usedBytes = math.max(0, totalBytes - availableBytes)
             end
-            cells[#cells + 1] = {
+            target[#target + 1] = {
                 item = cellName(cell, index),
-                cellType = cell.cellType or "item",
+                cellType = cell.cellType or cell.type or "item",
                 totalBytes = totalBytes,
                 usedBytes = usedBytes,
                 usedKnown = usedBytes ~= nil,
@@ -133,16 +129,47 @@ local function refreshStorageMetrics()
             }
         end
     end
+end
+
+local function refreshStorageMetrics()
+    if not meConnected or not meDevice then
+        storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
+        return
+    end
     local total = tonumber(safeCall(meDevice, "getMaxItemStorage", nil))
         or tonumber(safeCall(meDevice, "getTotalItemStorage", 0)) or 0
     local used = tonumber(safeCall(meDevice, "getUsedItemStorage", 0)) or 0
     local available = tonumber(safeCall(meDevice, "getAvailableItemStorage", nil))
         or math.max(0, total - used)
+    local cells = {}
+    appendCells(cells, safeCall(meDevice, "getCells", nil))
+    storageCellSource = "getCells"
+    if #cells == 0 then
+        appendCells(cells, safeCall(meDevice, "listCells", nil))
+        storageCellSource = "listCells"
+    end
+    if #cells == 0 then
+        appendCells(cells, safeCall(meDevice, "getDrives", nil))
+        storageCellSource = "getDrives"
+    end
+    if #cells == 0 and total > 0 then
+        -- Some AP/AE2 addon combinations expose aggregate capacity but hide
+        -- individual third-party cells. Keep the dashboard useful and honest.
+        cells[1] = {
+            item = "ME network total (cells unavailable)",
+            cellType = "aggregate",
+            totalBytes = total,
+            usedBytes = used,
+            usedKnown = true,
+        }
+        storageCellSource = "aggregate fallback"
+    end
     storageMetrics = {
         total = total,
         used = used,
         available = available,
         cells = cells,
+        cellSource = storageCellSource,
     }
 end
 
@@ -249,7 +276,8 @@ local function sendStorageSnapshot()
         type = "storage_end",
         snapshotId = snapshotId,
     })
-    storageDetails = "Sent " .. #compactItems .. " item types"
+    storageDetails = "Sent " .. #compactItems .. " item types | cells: "
+        .. #storageMetrics.cells .. " via " .. storageCellSource
 end
 
 local function drawStatus()
