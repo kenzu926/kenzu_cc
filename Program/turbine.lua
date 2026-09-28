@@ -1,11 +1,29 @@
 -- Mekanism turbine telemetry service with automatic multi-turbine discovery.
 local CHECK_INTERVAL = 2
 local JOULES_PER_FE = 2.5
+local OVERVIEW_TURBINE_PROTOCOL = "kenzu_cc.overview.turbines"
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local server = GatewayClient.new("turbine")
+
+local function openWirelessModem()
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.hasType(name, "modem") then
+            local modem = peripheral.wrap(name)
+            if modem and modem.isWireless then
+                local ok, wireless = pcall(modem.isWireless)
+                if ok and wireless then
+                    rednet.open(name)
+                    return name
+                end
+            end
+        end
+    end
+end
+
+local wirelessModemName = openWirelessModem()
 
 local function hasPeripheralType(name, peripheralType)
     if not peripheral.hasType then return false end
@@ -91,6 +109,13 @@ end
 local function sendStatus()
     local statuses = readStatuses()
     server:send({ type = "turbines_status", turbines = statuses })
+    if wirelessModemName then
+        rednet.broadcast({
+            version = 1,
+            computerId = os.getComputerID(),
+            turbines = statuses,
+        }, OVERVIEW_TURBINE_PROTOCOL)
+    end
 
     term.clear()
     term.setCursorPos(1, 1)

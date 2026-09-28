@@ -8,6 +8,7 @@ local CONSOLE_REQUEST_PROTOCOL = "kenzu_cc.console.request"
 local CONSOLE_RESPONSE_PROTOCOL = "kenzu_cc.console.response"
 local TERMINAL_FRAME_PROTOCOL = "kenzu_cc.terminal.frame"
 local TERMINAL_INPUT_PROTOCOL = "kenzu_cc.terminal.input"
+local OVERVIEW_REACTOR_PROTOCOL = "kenzu_cc.overview.reactor"
 local REMOTE_TIMEOUT = 20 * 1000
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
@@ -314,9 +315,7 @@ local function sendReactorStatus()
     local input = safeNumber(matrix.getLastInput) / JOULES_PER_FE
     local output = safeNumber(matrix.getLastOutput) / JOULES_PER_FE
 
-    server:send({
-        type = "matrix_status",
-        data = {
+    local matrixData = {
             name = MATRIX_NAME,
             energyPercent = energy * 100,
             storedEnergy = storedEnergy,
@@ -327,12 +326,9 @@ local function sendReactorStatus()
             energyNeeded = safeNumber(matrix.getEnergyNeeded) / JOULES_PER_FE,
             energyUnit = "FE",
             joulesPerFE = JOULES_PER_FE,
-        },
-    })
+        }
 
-    server:send({
-        type = "reactor_status",
-        data = {
+    local reactorData = {
             name = REACTOR_NAME,
             running = reactorRunning,
             startPercent = startPercent,
@@ -373,8 +369,19 @@ local function sendReactorStatus()
             },
             remoteComputerOnline = isRemoteOnline(),
             remoteMEConnected = remoteMEConnected,
-        },
-    })
+        }
+
+    server:send({ type = "matrix_status", data = matrixData })
+    server:send({ type = "reactor_status", data = reactorData })
+
+    if wirelessModemName then
+        rednet.broadcast({
+            version = 1,
+            computerId = os.getComputerID(),
+            matrix = matrixData,
+            reactor = reactorData,
+        }, OVERVIEW_REACTOR_PROTOCOL)
+    end
 end
 
 local function consoleStatus()

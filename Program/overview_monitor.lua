@@ -1,21 +1,24 @@
--- Local overview dashboard for the 6x4 monitor_1.
--- It reads peripherals directly, so it keeps working without the web server.
+-- 6x4 base dashboard. The monitor may be attached to the ME node while
+-- reactor, matrix and turbines are attached to another computer.
 local MONITOR_NAME = "monitor_1"
 local MATRIX_NAME = "inductionPort_0"
 local REACTOR_NAME = "fissionReactorLogicAdapter_0"
+local ME_NAME = "meBridge_0"
 local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
+local REACTOR_PROTOCOL = "kenzu_cc.overview.reactor"
+local TURBINE_PROTOCOL = "kenzu_cc.overview.turbines"
 local REFRESH_INTERVAL = 1
-local REMOTE_TIMEOUT = 20 * 1000
+local REMOTE_TIMEOUT = 10 * 1000
 local JOULES_PER_FE = 2.5
+local STARTED_AT = os.epoch("utc")
 
 local monitor = assert(peripheral.wrap(MONITOR_NAME), "Overview monitor not found: " .. MONITOR_NAME)
 local matrix = peripheral.wrap(MATRIX_NAME)
 local reactor = peripheral.wrap(REACTOR_NAME)
-local lastMEHeartbeat = nil
-local meConnected = false
-local meCells = 0
-local meUsed = 0
-local meTotal = 0
+local meBridge = peripheral.wrap(ME_NAME)
+local remoteMatrix, remoteReactor, remoteTurbines
+local reactorHeartbeat, turbineHeartbeat, meHeartbeat
+local remoteME = { connected = false, cells = 0, used = 0, total = 0 }
 
 monitor.setTextScale(0.5)
 
@@ -23,9 +26,12 @@ local function openWirelessModem()
     for _, name in ipairs(peripheral.getNames()) do
         if peripheral.hasType(name, "modem") then
             local modem = peripheral.wrap(name)
-            if modem.isWireless and modem.isWireless() then
-                rednet.open(name)
-                return true
+            if modem and modem.isWireless then
+                local ok, wireless = pcall(modem.isWireless)
+                if ok and wireless then
+                    rednet.open(name)
+                    return true
+                end
             end
         end
     end
@@ -34,43 +40,143 @@ end
 
 local hasRednet = openWirelessModem()
 
-local function safeCall(device, method, fallback)
-    if not device or not device[method] then return fallback or 0 end
+local function safeRawCall(device, method)
+    if not device or not device[method] then return nil end
     local ok, value = pcall(device[method])
-    if not ok then return fallback or 0 end
-    if type(value) == "table" then return tonumber(value.amount or value[1]) or fallback or 0 end
+    if not ok then return nil end
+    return value
+end
+
+local function safeNumber(device, method, fallback)
+    local value = safeRawCall(device, method)
+    if type(value) == "table" then value = value.amount or value[1] end
     return tonumber(value) or fallback or 0
 end
 
-local function safeBooleanCall(device, method)
-    if not device or not device[method] then return false end
-    local ok, value = pcall(device[method])
-    return ok and value == true
+local function safeBoolean(device, method, fallback)
+    local value = safeRawCall(device, method)
+    if value == nil then return fallback == true end
+    return value == true
+end
+
+local function countEntries(value)
+    if type(value) ~= "table" then return 0 end
+    local count = 0
+    for _ in pairs(value) do count = count + 1 end
+    return count
 end
 
 local function shorten(value)
+    value = tonumber(value) or 0
     local absolute = math.abs(value)
-    if absolute >= 1e15 then return ("%.2f P"):format(value / 1e15) end
-    if absolute >= 1e12 then return ("%.2f T"):format(value / 1e12) end
-    if absolute >= 1e9 then return ("%.2f G"):format(value / 1e9) end
-    if absolute >= 1e6 then return ("%.2f M"):format(value / 1e6) end
-    if absolute >= 1e3 then return ("%.1f k"):format(value / 1e3) end
+    if absolute >= 1e15 then return ("%.2fP"):format(value / 1e15) end
+    if absolute >= 1e12 then return ("%.2fT"):format(value / 1e12) end
+    if absolute >= 1e9 then return ("%.2fG"):format(value / 1e9) end
+    if absolute >= 1e6 then return ("%.2fM"):format(value / 1e6) end
+    if absolute >= 1e3 then return ("%.1fk"):format(value / 1e3) end
     return ("%.0f"):format(value)
 end
 
-local function turbineSummary()
-    local count, production, flow = 0, 0, 0
+local function isFresh(timestamp)
+    return timestamp ~= nil and os.epoch("utc") - timestamp <= REMOTE_TIMEOUT
+end
+
+local function matrixStats()
+    if matrix then
+        return {
+            energyPercent = safeNumber(matrix, "getEnergyFilledPercentage") * 100,
+            storedEnergy = safeNumber(matrix, "getEnergy") / JOULES_PER_FE,
+            capacity = safeNumber(matrix, "getMaxEnergy") / JOULES_PER_FE,
+            input = safeNumber(matrix, "getLastInput") / JOULES_PER_FE,
+            output = safeNumber(matrix, "getLastOutput") / JOULES_PER_FE,
+        }, "LOCAL"
+    end
+    if isFresh(reactorHeartbeat) and type(remoteMatrix) == "table" then
+        return remoteMatrix, "REDNET"
+    end
+    return {}, "OFFLINE"
+end
+
+local function reactorStats()
+    if reactor then
+        return {
+            running = safeBoolean(reactor, "getStatus"),
+            temperature = safeNumber(reactor, "getTemperature"),
+            actualBurnRate = safeNumber(reactor, "getActualBurnRate"),
+            coolantPercent = safeNumber(reactor, "getCoolantFilledPercentage") * 100,
+            fuelPercent = safeNumber(reactor, "getFuelFilledPercentage") * 100,
+            wastePercent = safeNumber(reactor, "getWasteFilledPercentage") * 100,
+            damage = safeNumber(reactor, "getDamagePercent"),
+        }, "LOCAL"
+    end
+    if isFresh(reactorHeartbeat) and type(remoteReactor) == "table" then
+        return remoteReactor, "REDNET"
+    end
+    return {}, "OFFLINE"
+end
+
+local function localTurbines()
+    local statuses = {}
     for _, name in ipairs(peripheral.getNames()) do
         if name:lower():find("turbine", 1, true) then
-            local turbine = peripheral.wrap(name)
-            if turbine and (turbine.getProductionRate or turbine.getEnergy) then
-                count = count + 1
-                production = production + safeCall(turbine, "getProductionRate") / JOULES_PER_FE
-                flow = flow + safeCall(turbine, "getFlowRate")
+            local device = peripheral.wrap(name)
+            if device and (device.getProductionRate or device.getFlowRate) then
+                statuses[#statuses + 1] = {
+                    production = safeNumber(device, "getProductionRate") / JOULES_PER_FE,
+                    flowRate = safeNumber(device, "getFlowRate"),
+                    maxFlowRate = safeNumber(device, "getMaxFlowRate"),
+                    steamPercent = safeNumber(device, "getSteamFilledPercentage") * 100,
+                }
             end
         end
     end
-    return count, production, flow
+    return statuses
+end
+
+local function turbineStats()
+    local statuses = localTurbines()
+    local source = "LOCAL"
+    if #statuses == 0 then
+        if isFresh(turbineHeartbeat) and type(remoteTurbines) == "table" then
+            statuses = remoteTurbines
+            source = "REDNET"
+        else
+            source = "OFFLINE"
+        end
+    end
+    local result = { count = #statuses, production = 0, flow = 0, maxFlow = 0, steam = 0 }
+    for _, value in ipairs(statuses) do
+        result.production = result.production + (tonumber(value.production) or 0)
+        result.flow = result.flow + (tonumber(value.flowRate) or 0)
+        result.maxFlow = result.maxFlow + (tonumber(value.maxFlowRate) or 0)
+        result.steam = result.steam + (tonumber(value.steamPercent) or 0)
+    end
+    if result.count > 0 then result.steam = result.steam / result.count end
+    return result, source
+end
+
+local function meStats()
+    if meBridge then
+        local snapshot = safeRawCall(meBridge, "getStorageStats")
+        local total = type(snapshot) == "table" and tonumber(snapshot.total) or nil
+        local used = type(snapshot) == "table" and tonumber(snapshot.used) or nil
+        local cells = type(snapshot) == "table" and countEntries(snapshot.cells) or 0
+        total = total or safeNumber(meBridge, "getMaxItemStorage")
+        if total == 0 then total = safeNumber(meBridge, "getTotalItemStorage") end
+        used = used or safeNumber(meBridge, "getUsedItemStorage")
+        if cells == 0 then
+            cells = countEntries(safeRawCall(meBridge, "getCells"))
+            if cells == 0 then cells = countEntries(safeRawCall(meBridge, "listCells")) end
+        end
+        return {
+            connected = safeBoolean(meBridge, "isConnected", true),
+            cells = cells,
+            used = used,
+            total = total,
+        }, "LOCAL"
+    end
+    if isFresh(meHeartbeat) then return remoteME, "REDNET" end
+    return { connected = false, cells = 0, used = 0, total = 0 }, "OFFLINE"
 end
 
 local function fill(x1, y1, x2, y2, background)
@@ -95,59 +201,101 @@ local function text(x, y, value, color, background)
     monitor.write(value:sub(1, math.max(0, width - x + 1)))
 end
 
-local function bar(x, y, width, percent, color)
-    percent = math.max(0, math.min(100, percent or 0))
-    fill(x, y, x + width - 1, y, colors.gray)
-    local filled = math.floor(width * percent / 100 + 0.5)
-    if filled > 0 then fill(x, y, x + filled - 1, y, color or colors.lime) end
+local function centered(y, value, color, background)
+    local width = monitor.getSize()
+    value = tostring(value)
+    text(math.max(1, math.floor((width - #value) / 2) + 1), y, value, color, background)
+end
+
+local function bar(x, y, width, percent, color, rows)
+    percent = math.max(0, math.min(100, tonumber(percent) or 0))
+    rows = rows or 1
+    fill(x, y, x + width - 1, y + rows - 1, colors.gray)
+    local amount = math.floor(width * percent / 100 + 0.5)
+    if amount > 0 then fill(x, y, x + amount - 1, y + rows - 1, color or colors.lime) end
+end
+
+local function sectionHeader(y, label, source, color)
+    local width = monitor.getSize()
+    fill(1, y, width, y, colors.gray)
+    text(2, y, label, color, colors.gray)
+    text(math.max(2, width - #source), y, source, source == "OFFLINE" and colors.red or colors.lime, colors.gray)
+end
+
+local function meter(y, label, percent, color)
+    local width = monitor.getSize()
+    text(3, y, label, colors.lightGray)
+    text(math.max(3, width - 8), y, ("%6.1f%%"):format(tonumber(percent) or 0), colors.white)
+    bar(3, y + 1, math.max(8, width - 6), percent, color, 1)
+end
+
+local function moscowDateTime()
+    local seconds = math.floor(os.epoch("utc") / 1000) + 3 * 60 * 60
+    local ok, value = pcall(os.date, "!%d.%m.%Y %H:%M:%S", seconds)
+    return ok and value or textutils.formatTime(os.time() + 3, true)
+end
+
+local function uptime()
+    local seconds = math.max(0, math.floor((os.epoch("utc") - STARTED_AT) / 1000))
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor(seconds % 3600 / 60)
+    return ("UP %02d:%02d:%02d"):format(hours, minutes, seconds % 60)
 end
 
 local function draw()
     local width, height = monitor.getSize()
+    local matrixData, matrixSource = matrixStats()
+    local reactorData, reactorSource = reactorStats()
+    local turbines, turbineSource = turbineStats()
+    local storage, meSource = meStats()
+    local energy = tonumber(matrixData.energyPercent) or 0
+    local stored = tonumber(matrixData.storedEnergy) or 0
+    local capacity = tonumber(matrixData.capacity) or 0
+    local input = tonumber(matrixData.input) or 0
+    local output = tonumber(matrixData.output) or 0
+
     monitor.setBackgroundColor(colors.black)
     monitor.clear()
 
-    fill(1, 1, width, 3, colors.gray)
-    text(3, 2, "ATM9 BASE OVERVIEW", colors.cyan, colors.gray)
-    text(math.max(3, width - 10), 2, textutils.formatTime(os.time(), true), colors.lightGray, colors.gray)
+    fill(1, 1, width, 4, colors.gray)
+    centered(1, 'ATM9 - "Maids in stockings"(gornichnyye v chulochkakh)', colors.cyan, colors.gray)
+    text(2, 3, moscowDateTime() .. " MSK", colors.white, colors.gray)
+    local up = uptime()
+    text(math.max(2, width - #up), 3, up, colors.lightGray, colors.gray)
 
-    local energyPercent = safeCall(matrix, "getEnergyFilledPercentage") * 100
-    local stored = safeCall(matrix, "getEnergy") / JOULES_PER_FE
-    local capacity = safeCall(matrix, "getMaxEnergy") / JOULES_PER_FE
-    local input = safeCall(matrix, "getLastInput") / JOULES_PER_FE
-    local output = safeCall(matrix, "getLastOutput") / JOULES_PER_FE
-    text(3, 5, "INDUCTION MATRIX", colors.lightBlue)
-    text(3, 7, ("Energy  %6.2f%%   %s / %s FE"):format(energyPercent, shorten(stored), shorten(capacity)))
-    bar(3, 9, math.max(10, width - 6), energyPercent, energyPercent > 95 and colors.orange or colors.lime)
-    text(3, 11, ("Input %s FE/t   Output %s FE/t   Net %s"):format(
+    sectionHeader(6, " INDUCTION MATRIX", matrixSource, colors.lightBlue)
+    text(3, 7, ("%s / %s FE"):format(shorten(stored), shorten(capacity)), colors.white)
+    meter(8, "ENERGY", energy, energy >= 95 and colors.orange or colors.lime)
+    text(3, 11, ("IN %s FE/t   OUT %s FE/t   NET %s"):format(
         shorten(input), shorten(output), shorten(input - output)), colors.lightGray)
 
-    local running = safeBooleanCall(reactor, "getStatus")
-    local temperature = safeCall(reactor, "getTemperature")
-    local burn = safeCall(reactor, "getActualBurnRate")
-    local coolant = safeCall(reactor, "getCoolantFilledPercentage") * 100
-    local fuel = safeCall(reactor, "getFuelFilledPercentage") * 100
-    local waste = safeCall(reactor, "getWasteFilledPercentage") * 100
-    text(3, 14, "FISSION REACTOR", colors.yellow)
-    text(3, 16, running and "ONLINE" or "SCRAMMED", running and colors.lime or colors.red)
-    text(16, 16, ("Temp %.1f K   Burn %.2f mB/t"):format(temperature, burn))
-    text(3, 18, ("Water %5.1f%%   Fuel %5.1f%%   Waste %5.1f%%"):format(coolant, fuel, waste), colors.lightGray)
+    sectionHeader(13, " FISSION REACTOR", reactorSource, colors.yellow)
+    local running = reactorData.running == true
+    text(3, 14, running and "ONLINE" or "SCRAMMED", running and colors.lime or colors.red)
+    text(16, 14, ("TEMP %.0f K  BURN %.2f mB/t  DAMAGE %.1f%%"):format(
+        tonumber(reactorData.temperature) or 0,
+        tonumber(reactorData.actualBurnRate) or 0,
+        tonumber(reactorData.damage) or 0), colors.lightGray)
+    meter(16, "WATER", reactorData.coolantPercent, colors.blue)
+    meter(19, "FUEL", reactorData.fuelPercent, colors.green)
+    meter(22, "WASTE", reactorData.wastePercent, colors.red)
 
-    local turbineCount, generation, flow = turbineSummary()
-    text(3, 21, "TURBINES", colors.purple)
-    text(3, 23, ("%d connected   %s FE/t   Flow %s mB/t"):format(
-        turbineCount, shorten(generation), shorten(flow)))
+    sectionHeader(25, " TURBINES", turbineSource, colors.purple)
+    text(3, 26, ("%d UNITS   GENERATION %s FE/t"):format(turbines.count, shorten(turbines.production)), colors.white)
+    local flowPercent = turbines.maxFlow > 0 and turbines.flow / turbines.maxFlow * 100 or 0
+    meter(27, ("FLOW %s/%s mB/t"):format(shorten(turbines.flow), shorten(turbines.maxFlow)), flowPercent, colors.purple)
+    meter(30, "STEAM BUFFER", turbines.steam, colors.lightBlue)
 
-    local meOnline = lastMEHeartbeat and os.epoch("utc") - lastMEHeartbeat <= REMOTE_TIMEOUT
-    text(3, 26, "AE2 STORAGE", colors.cyan)
-    text(3, 28, meOnline and (meConnected and "CONNECTED" or "DISCONNECTED") or "NODE OFFLINE",
-        meOnline and meConnected and colors.lime or colors.red)
-    text(20, 28, ("Cells %d   Used %s / %s"):format(meCells, shorten(meUsed), shorten(meTotal)), colors.lightGray)
+    sectionHeader(33, " AE2 STORAGE", meSource, colors.cyan)
+    local storagePercent = storage.total > 0 and storage.used / storage.total * 100 or 0
+    text(3, 34, storage.connected and ("CONNECTED   CELLS " .. storage.cells) or "DISCONNECTED",
+        storage.connected and colors.lime or colors.red)
+    meter(35, ("USED %s/%s"):format(shorten(storage.used), shorten(storage.total)), storagePercent, colors.cyan)
 
-    local footerY = math.min(height, 31)
-    fill(1, footerY, width, footerY, colors.gray)
-    text(3, footerY, hasRednet and "LOCAL CONTROL ACTIVE | REDNET ONLINE" or "LOCAL CONTROL ACTIVE | REDNET OFFLINE",
-        hasRednet and colors.lime or colors.orange, colors.gray)
+    fill(1, height, width, height, colors.gray)
+    text(2, height, hasRednet and "REDNET LINK ACTIVE" or "REDNET LINK OFFLINE",
+        hasRednet and colors.lime or colors.red, colors.gray)
+    text(math.max(2, width - 20), height, "LOCAL SAFETY ACTIVE", colors.yellow, colors.gray)
 end
 
 draw()
@@ -155,18 +303,36 @@ local timer = os.startTimer(REFRESH_INTERVAL)
 while true do
     local event, arg1, arg2, arg3 = os.pullEvent()
     if event == "timer" and arg1 == timer then
+        matrix = peripheral.wrap(MATRIX_NAME)
+        reactor = peripheral.wrap(REACTOR_NAME)
+        meBridge = peripheral.wrap(ME_NAME)
         draw()
         timer = os.startTimer(REFRESH_INTERVAL)
     elseif event == "monitor_resize" and arg1 == MONITOR_NAME then
         draw()
+    elseif event == "rednet_message" and arg3 == REACTOR_PROTOCOL and type(arg2) == "table" then
+        remoteMatrix = arg2.matrix
+        remoteReactor = arg2.reactor
+        reactorHeartbeat = os.epoch("utc")
+        draw()
+    elseif event == "rednet_message" and arg3 == TURBINE_PROTOCOL and type(arg2) == "table" then
+        remoteTurbines = arg2.turbines
+        turbineHeartbeat = os.epoch("utc")
+        draw()
     elseif event == "rednet_message" and arg3 == ME_STATUS_PROTOCOL and type(arg2) == "table" then
-        lastMEHeartbeat = os.epoch("utc")
-        meConnected = arg2.meConnected == true
         local metrics = type(arg2.metrics) == "table" and arg2.metrics or {}
-        local cells = type(metrics.cells) == "table" and metrics.cells or {}
-        meCells = #cells
-        meUsed = tonumber(metrics.used) or 0
-        meTotal = tonumber(metrics.total) or 0
+        remoteME = {
+            connected = arg2.meConnected == true,
+            cells = countEntries(metrics.cells),
+            used = tonumber(metrics.used) or 0,
+            total = tonumber(metrics.total) or 0,
+        }
+        meHeartbeat = os.epoch("utc")
+        draw()
+    elseif event == "peripheral" or event == "peripheral_detach" then
+        matrix = peripheral.wrap(MATRIX_NAME)
+        reactor = peripheral.wrap(REACTOR_NAME)
+        meBridge = peripheral.wrap(ME_NAME)
         draw()
     end
 end
