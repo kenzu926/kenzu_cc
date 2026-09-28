@@ -14,15 +14,12 @@ local function meNodeIsReady()
     return false
 end
 
-local function turbineIsReady()
-    if peripheral.find("turbineValve") ~= nil then return true end
-    for _, name in ipairs(peripheral.getNames()) do
-        if name:lower():find("turbine") then return true end
-    end
-    return false
-end
-
 local PROGRAMS = {
+    {
+        path = "update_agent.lua",
+        title = "Update Agent",
+        shouldRun = function() return true end,
+    },
     {
         path = "remote_terminal.lua",
         title = "Remote Terminal",
@@ -41,7 +38,8 @@ local PROGRAMS = {
     {
         path = "turbine.lua",
         title = "Turbine",
-        shouldRun = turbineIsReady,
+        -- Always keep discovery alive so turbines added after boot appear too.
+        shouldRun = function() return true end,
     },
 }
 

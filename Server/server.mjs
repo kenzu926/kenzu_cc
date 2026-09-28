@@ -98,6 +98,22 @@ function touchComputer(socket) {
   };
 }
 
+function touchRoleState(socket) {
+  const now = Date.now();
+  if (socket.role === "reactor") {
+    state.matrix.online = true;
+    state.matrix.lastSeen = now;
+    state.matrix.computerId = socket.computerId;
+    state.reactor.online = true;
+    state.reactor.lastSeen = now;
+    state.reactor.computerId = socket.computerId;
+  } else if (socket.role === "storage_node") {
+    state.storage.online = true;
+    state.storage.lastSeen = now;
+    state.storage.computerId = socket.computerId;
+  }
+}
+
 function broadcastComputers() {
   broadcastToBrowsers({ type: "computers_state", computers: state.computers });
 }
@@ -238,6 +254,7 @@ websocketServer.on("connection", (socket) => {
       socket.label = message.label ?? null;
       roleClients.get(socket.role)?.add(socket);
       touchComputer(socket);
+      touchRoleState(socket);
 
       if (socket.role === "browser") send(socket, { type: "state", state: publicState() });
       else broadcastComputers();
@@ -250,6 +267,7 @@ websocketServer.on("connection", (socket) => {
     }
 
     touchComputer(socket);
+    touchRoleState(socket);
 
     if (message.type === "ping") {
       send(socket, { type: "pong", sentAt: message.sentAt ?? null, serverAt: Date.now() });
@@ -303,13 +321,37 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
+    if (message.type === "turbines_status" && socket.role === "turbine") {
+      const prefix = `${computerKey(socket.role, socket.computerId)}:`;
+      for (const key of turbineUnits.keys()) {
+        if (key.startsWith(prefix)) turbineUnits.delete(key);
+      }
+
+      const turbines = Array.isArray(message.turbines) ? message.turbines.slice(0, 128) : [];
+      turbines.forEach((data, index) => {
+        if (!data || typeof data !== "object") return;
+        const peripheral = String(data.peripheral || `turbine_${index}`).slice(0, 100);
+        turbineUnits.set(`${prefix}${peripheral}`, {
+          online: true,
+          lastSeen: Date.now(),
+          computerId: socket.computerId,
+          data: { ...data, peripheral },
+        });
+      });
+      state.turbines = [...turbineUnits.values()];
+      broadcastToBrowsers({ type: "turbines_state", turbines: state.turbines });
+      return;
+    }
+
+    // Compatibility with computers which have not received the new updater yet.
     if (message.type === "turbine_status" && socket.role === "turbine") {
-      const key = computerKey(socket.role, socket.computerId);
+      const peripheral = String(message.data?.peripheral || "turbine").slice(0, 100);
+      const key = `${computerKey(socket.role, socket.computerId)}:${peripheral}`;
       turbineUnits.set(key, {
         online: true,
         lastSeen: Date.now(),
         computerId: socket.computerId,
-        data: message.data,
+        data: { ...message.data, peripheral },
       });
       state.turbines = [...turbineUnits.values()];
       broadcastToBrowsers({ type: "turbines_state", turbines: state.turbines });
@@ -429,6 +471,18 @@ websocketServer.on("connection", (socket) => {
       const replacement = [...(roleClients.get(socket.role) || [])]
         .some((candidate) => candidate.computerId === socket.computerId);
       if (!replacement && state.computers[key]) state.computers[key].online = false;
+      if (!replacement && socket.role === "reactor") {
+        state.matrix.online = false;
+        state.reactor.online = false;
+      }
+      if (!replacement && socket.role === "storage_node") state.storage.online = false;
+      if (!replacement && socket.role === "turbine") {
+        for (const unit of turbineUnits.values()) {
+          if (unit.computerId === socket.computerId) unit.online = false;
+        }
+        state.turbines = [...turbineUnits.values()];
+        broadcastToBrowsers({ type: "turbines_state", turbines: state.turbines });
+      }
       if (socket.role === "terminal" && !replacement && state.terminals[String(socket.computerId)]) {
         state.terminals[String(socket.computerId)].online = false;
         broadcastToBrowsers({ type: "terminal_frame", terminal: state.terminals[String(socket.computerId)] });

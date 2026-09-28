@@ -9,6 +9,8 @@ local REPOSITORY_BASE_URL =
 
 local FILES = {
     "startup.lua",
+    "update.lua",
+    "update_agent.lua",
     "ws_client.lua",
     "console.lua",
     "reactor.lua",
@@ -18,7 +20,10 @@ local FILES = {
     "service_runner.lua",
 }
 
-local installDirectory = shell.dir()
+-- The updater passes its own directory as argument 4. A direct `wget run`
+-- installation keeps using the directory in which the command was started.
+local installDirectory = arguments[4]
+if installDirectory == nil then installDirectory = shell.dir() end
 
 local function installPath(fileName)
     return fs.combine(installDirectory, fileName)
@@ -154,6 +159,8 @@ end
 if arguments[2] and arguments[2] ~= "" then
     settings.set("kenzu.serverToken", arguments[2])
 end
+settings.set("kenzu.lastInstallAt", os.epoch("utc"))
+settings.set("kenzu.lastInstallId", arguments[3] or tostring(os.epoch("utc")))
 settings.save(installPath("server.settings"))
 
 term.setTextColor(colors.lime)

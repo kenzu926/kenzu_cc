@@ -217,7 +217,7 @@ function TurbinesPanel({ turbines }) {
         <div className="module-icon"><Icon name="turbine" size={34} /></div>
         <p className="eyebrow">INFRASTRUCTURE READY</p>
         <h2>Turbine monitoring</h2>
-        <p>Connect a Mekanism turbine valve to a CC computer. The installer already includes <code>turbine.lua</code>, and this page will populate automatically.</p>
+        <p>Connect one or more Mekanism turbine valves to a CC computer. Every <code>turbineValue_*</code> peripheral will be discovered automatically.</p>
       </section>
     );
   }
@@ -227,7 +227,7 @@ function TurbinesPanel({ turbines }) {
       {turbines.map((unit, index) => {
         const data = unit.data || {};
         return (
-          <article className="hero-card" key={`${unit.computerId}-${index}`}>
+          <article className="hero-card" key={`${unit.computerId}-${data.peripheral || index}`}>
             <SectionHeading eyebrow="MEKANISM TURBINE" title={data.peripheral || `Turbine ${index + 1}`} online={unit.online} />
             <div className="metrics-row">
               <Metric label="Production" value={formatRate(data.production)} tone="good" />
@@ -335,6 +335,9 @@ function TerminalScreen({ terminal, sendTerminalInput }) {
 
   function onKeyDown(event) {
     if (!terminal?.online) return;
+    // Let the browser emit a ClipboardEvent. Preventing Ctrl+V here stops the
+    // paste handler below from receiving the clipboard text.
+    if ((event.ctrlKey || event.metaKey) && event.code === "KeyV") return;
     const key = browserKeyName(event);
     const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     if (key && !printable && !pressed.current.has(event.code)) {
@@ -346,6 +349,7 @@ function TerminalScreen({ terminal, sendTerminalInput }) {
   }
 
   function onKeyUp(event) {
+    if ((event.ctrlKey || event.metaKey) && event.code === "KeyV") return;
     const key = browserKeyName(event);
     pressed.current.delete(event.code);
     const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;

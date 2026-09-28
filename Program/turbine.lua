@@ -1,4 +1,4 @@
--- Future-ready Mekanism turbine telemetry service.
+-- Mekanism turbine telemetry service with automatic multi-turbine discovery.
 local CHECK_INTERVAL = 2
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
@@ -6,19 +6,31 @@ local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local server = WebSocketClient.new("turbine")
 
-local function findTurbine()
-    local matchedName
-    local turbine = peripheral.find("turbineValve", function(foundName)
-        matchedName = foundName
-        return true
-    end)
-    if turbine then return turbine, matchedName end
+local function hasPeripheralType(name, peripheralType)
+    if not peripheral.hasType then return false end
+    local ok, result = pcall(peripheral.hasType, name, peripheralType)
+    return ok and result == true
+end
 
-    for _, candidate in ipairs(peripheral.getNames()) do
-        if candidate:lower():find("turbine") then
-            return peripheral.wrap(candidate), candidate
+local function isTurbine(name)
+    local lowerName = name:lower()
+    return lowerName:match("^turbinevalue") ~= nil
+        or lowerName:match("^turbinevalve") ~= nil
+        or hasPeripheralType(name, "turbineValue")
+        or hasPeripheralType(name, "turbineValve")
+        or lowerName:find("turbine", 1, true) ~= nil
+end
+
+local function findTurbines()
+    local turbines = {}
+    for _, name in ipairs(peripheral.getNames()) do
+        if isTurbine(name) then
+            local device = peripheral.wrap(name)
+            if device then turbines[#turbines + 1] = { name = name, device = device } end
         end
     end
+    table.sort(turbines, function(left, right) return left.name < right.name end)
+    return turbines
 end
 
 local function safeNumber(device, methodName, fallback)
@@ -28,12 +40,10 @@ local function safeNumber(device, methodName, fallback)
     return ok and (tonumber(value) or fallback or 0) or (fallback or 0)
 end
 
-local function readStatus()
-    local turbine, name = findTurbine()
-    if not turbine then return nil end
-
+local function readTurbine(entry)
+    local turbine = entry.device
     return {
-        peripheral = name or "turbine",
+        peripheral = entry.name,
         production = safeNumber(turbine, "getProductionRate"),
         flowRate = safeNumber(turbine, "getFlowRate"),
         maxFlowRate = safeNumber(turbine, "getMaxFlowRate"),
@@ -45,22 +55,35 @@ local function readStatus()
     }
 end
 
-local function statusText()
-    local data = readStatus()
-    if not data then return "Turbine valve not found" end
-    return ("%s\nProduction: %.2f FE/t\nFlow: %.2f / %.2f mB/t\nSteam: %.1f%%\nEnergy: %.1f%%")
-        :format(data.peripheral, data.production, data.flowRate, data.maxFlowRate,
-            data.steamPercent, data.energyPercent)
+local function readStatuses()
+    local statuses = {}
+    for _, entry in ipairs(findTurbines()) do
+        statuses[#statuses + 1] = readTurbine(entry)
+    end
+    return statuses
+end
+
+local function statusText(statuses)
+    statuses = statuses or readStatuses()
+    if #statuses == 0 then return "No turbineValue peripherals found" end
+
+    local lines = { "Turbines: " .. #statuses }
+    for _, data in ipairs(statuses) do
+        lines[#lines + 1] = ("%s: %.2f FE/t, %.2f/%.2f mB/t, energy %.1f%%")
+            :format(data.peripheral, data.production, data.flowRate,
+                data.maxFlowRate, data.energyPercent)
+    end
+    return table.concat(lines, "\n")
 end
 
 local function sendStatus()
-    local data = readStatus()
-    server:send({ type = "turbine_status", data = data })
+    local statuses = readStatuses()
+    server:send({ type = "turbines_status", turbines = statuses })
 
     term.clear()
     term.setCursorPos(1, 1)
     print("Turbine telemetry")
-    print(statusText())
+    print(statusText(statuses))
     print("Web: " .. (server:isConnected() and "CONNECTED" or "OFFLINE"))
 end
 
