@@ -2,6 +2,8 @@
 local Client = {}
 Client.__index = Client
 local CONNECT_TIMEOUT_MS = 15 * 1000
+local KEEPALIVE_INTERVAL_MS = 5 * 1000
+local STALE_CONNECTION_MS = 20 * 1000
 
 function Client.new(role)
     settings.define("kenzu.serverUrl", {
@@ -31,6 +33,9 @@ function Client.new(role)
         socket = nil,
         connecting = false,
         lastAttempt = 0,
+        lastPing = 0,
+        lastReceived = 0,
+        heartbeatConfirmed = false,
         lastError = nil,
     }, Client)
 end
@@ -40,11 +45,26 @@ function Client:isConnected()
 end
 
 function Client:connect()
-    if self.socket or not http then
+    if not http then
         return false
     end
 
     local now = os.epoch("utc")
+    if self.socket then
+        if self.heartbeatConfirmed and self.lastReceived > 0
+            and now - self.lastReceived >= STALE_CONNECTION_MS then
+            pcall(self.socket.close)
+            self.socket = nil
+            self.connecting = false
+            self.lastError = "WebSocket heartbeat timed out"
+            self.lastAttempt = 0
+        elseif now - self.lastPing >= KEEPALIVE_INTERVAL_MS then
+            self.lastPing = now
+            self:send({ type = "ping", sentAt = now })
+        end
+        return false
+    end
+
     if self.connecting and now - self.lastAttempt >= CONNECT_TIMEOUT_MS then
         self.connecting = false
         self.lastError = "WebSocket connection timed out"
@@ -92,6 +112,8 @@ function Client:handleEvent(event, arg1, arg2, arg3)
         self.socket = arg2
         self.connecting = false
         self.lastError = nil
+        self.lastReceived = os.epoch("utc")
+        self.lastPing = self.lastReceived
         self:send({
             type = "hello",
             role = self.role,
@@ -117,6 +139,7 @@ function Client:handleEvent(event, arg1, arg2, arg3)
     end
 
     if event == "websocket_message" and arg1 == self.url and not arg3 then
+        self.lastReceived = os.epoch("utc")
         local decoded, decodeError = textutils.unserializeJSON(arg2)
         if not decoded then
             self.lastError = "Invalid server JSON: " .. tostring(decodeError)
@@ -128,6 +151,10 @@ function Client:handleEvent(event, arg1, arg2, arg3)
             self.socket = nil
             self.connecting = false
             return "disconnected"
+        end
+        if decoded.type == "pong" then
+            self.heartbeatConfirmed = true
+            return "pong", decoded
         end
         return "message", decoded
     end

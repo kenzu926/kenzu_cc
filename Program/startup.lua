@@ -46,6 +46,7 @@ local PROGRAMS = {
 }
 
 local projectDirectory = fs.getDir(shell.getRunningProgram())
+local runnerPath = fs.combine(projectDirectory, "service_runner.lua")
 
 local function projectPath(path)
     return fs.combine(projectDirectory, path)
@@ -76,7 +77,12 @@ for _, program in ipairs(PROGRAMS) do
     elseif fs.isDir(path) then
         printErrorMessage("Program is a directory: " .. program.path)
     else
-        local tabId = shell.openTab(path)
+        local tabId
+        if program.path == "remote_terminal.lua" or not fs.exists(runnerPath) then
+            tabId = shell.openTab(path)
+        else
+            tabId = shell.openTab(runnerPath, path, program.title)
+        end
         multishell.setTitle(tabId, program.title)
         launched = launched + 1
         print(("Started %s (%s)"):format(program.title, program.path))

@@ -251,6 +251,11 @@ websocketServer.on("connection", (socket) => {
 
     touchComputer(socket);
 
+    if (message.type === "ping") {
+      send(socket, { type: "pong", sentAt: message.sentAt ?? null, serverAt: Date.now() });
+      return;
+    }
+
     if (message.type === "matrix_status" && socket.role === "reactor") {
       state.matrix = {
         online: true,
