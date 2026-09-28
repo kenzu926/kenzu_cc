@@ -10,20 +10,23 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const AUTH_TOKEN = process.env.CC_AUTH_TOKEN || "";
 const OFFLINE_AFTER_MS = 10_000;
+const CONSOLE_HISTORY_LIMIT = 200;
 const rootDirectory = dirname(fileURLToPath(import.meta.url));
 const distDirectory = join(rootDirectory, "dist");
+
+if (AUTH_TOKEN.length < 24) {
+  console.error("CC_AUTH_TOKEN must contain at least 24 characters.");
+  process.exit(1);
+}
 
 const app = express();
 const server = createServer(app);
 const websocketServer = new WebSocketServer({ server, path: "/ws" });
 
 const state = {
-  reactor: {
-    online: false,
-    lastSeen: null,
-    computerId: null,
-    data: null,
-  },
+  matrix: { online: false, lastSeen: null, computerId: null, data: null },
+  reactor: { online: false, lastSeen: null, computerId: null, data: null },
+  turbines: [],
   storage: {
     online: false,
     lastSeen: null,
@@ -33,18 +36,19 @@ const state = {
     items: [],
     updatedAt: null,
   },
+  computers: {},
+  consoleHistory: [],
   lastCommand: null,
 };
 
 const clients = new Set();
-const reactorClients = new Set();
-const storageClients = new Set();
+const roleClients = new Map([
+  ["reactor", new Set()],
+  ["storage_node", new Set()],
+  ["turbine", new Set()],
+]);
 const storageSnapshots = new WeakMap();
-
-if (AUTH_TOKEN.length < 24) {
-  console.error("CC_AUTH_TOKEN must contain at least 24 characters.");
-  process.exit(1);
-}
+const turbineUnits = new Map();
 
 function tokenMatches(candidate) {
   if (typeof candidate !== "string") return false;
@@ -54,8 +58,7 @@ function tokenMatches(candidate) {
 }
 
 function send(socket, payload) {
-  if (socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify(payload));
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
 }
 
 function broadcastToBrowsers(payload) {
@@ -66,25 +69,102 @@ function broadcastToBrowsers(payload) {
 
 function publicState() {
   return {
+    matrix: state.matrix,
     reactor: state.reactor,
+    turbines: state.turbines,
     storage: state.storage,
+    computers: state.computers,
+    consoleHistory: state.consoleHistory,
     lastCommand: state.lastCommand,
   };
+}
+
+function computerKey(role, computerId) {
+  return `${role}:${computerId ?? "unknown"}`;
+}
+
+function touchComputer(socket) {
+  if (!socket.role || socket.role === "browser" || socket.role === "unknown") return;
+  const key = computerKey(socket.role, socket.computerId);
+  state.computers[key] = {
+    role: socket.role,
+    computerId: socket.computerId,
+    label: socket.label || null,
+    online: true,
+    lastSeen: Date.now(),
+  };
+}
+
+function broadcastComputers() {
+  broadcastToBrowsers({ type: "computers_state", computers: state.computers });
 }
 
 function validateCommand(message) {
   const allowed = new Set(["reactor_start", "reactor_scram", "set_thresholds"]);
   if (!allowed.has(message.action)) return "Unknown command";
+  if (message.action !== "set_thresholds") return null;
 
-  if (message.action === "set_thresholds") {
-    const start = Number(message.startPercent);
-    const stop = Number(message.stopPercent);
-    if (!Number.isInteger(start) || !Number.isInteger(stop)) {
-      return "Thresholds must be whole numbers";
+  const start = Number(message.startPercent);
+  const stop = Number(message.stopPercent);
+  if (!Number.isInteger(start) || !Number.isInteger(stop)) {
+    return "Thresholds must be whole numbers";
+  }
+  if (start < 0 || stop > 100 || start >= stop) {
+    return "Thresholds must satisfy 0 <= start < stop <= 100";
+  }
+  return null;
+}
+
+function sendToRole(role, payload) {
+  let recipients = 0;
+  for (const socket of roleClients.get(role) || []) {
+    if (socket.readyState === WebSocket.OPEN) {
+      send(socket, payload);
+      recipients += 1;
     }
-    if (start < 0 || stop > 100 || start >= stop) {
-      return "Thresholds must satisfy 0 <= start < stop <= 100";
+  }
+  return recipients;
+}
+
+function routeConsoleCommand(browser, message) {
+  const command = String(message.command || "").trim();
+  const target = String(message.target || "");
+  if (!command || command.length > 256) {
+    send(browser, { type: "console_output", ok: false, target, output: "Invalid command" });
+    return;
+  }
+
+  const payload = {
+    type: "console_command",
+    requestId: message.requestId || `${Date.now()}`,
+    target,
+    command,
+  };
+
+  let recipients = 0;
+  if (target === "storage_node") {
+    recipients = sendToRole("storage_node", payload);
+    if (recipients === 0) recipients = sendToRole("reactor", payload);
+  } else if (roleClients.has(target)) {
+    recipients = sendToRole(target, payload);
+  } else {
+    for (const socket of clients) {
+      if (socket.role !== "browser" && String(socket.computerId) === target) {
+        send(socket, payload);
+        recipients += 1;
+      }
     }
+  }
+
+  if (recipients === 0) {
+    send(browser, {
+      type: "console_output",
+      requestId: payload.requestId,
+      target,
+      ok: false,
+      output: "Target computer is offline",
+      at: Date.now(),
+    });
   }
 }
 
@@ -110,17 +190,32 @@ websocketServer.on("connection", (socket) => {
       }
 
       socket.authenticated = true;
-      socket.role = message.role;
+      socket.role = String(message.role || "unknown");
       socket.computerId = message.computerId ?? null;
+      socket.label = message.label ?? null;
+      roleClients.get(socket.role)?.add(socket);
+      touchComputer(socket);
 
-      if (socket.role === "reactor") reactorClients.add(socket);
-      if (socket.role === "storage_node") storageClients.add(socket);
       if (socket.role === "browser") send(socket, { type: "state", state: publicState() });
+      else broadcastComputers();
       return;
     }
 
     if (!socket.authenticated) {
       socket.close(1008, "Authentication required");
+      return;
+    }
+
+    touchComputer(socket);
+
+    if (message.type === "matrix_status" && socket.role === "reactor") {
+      state.matrix = {
+        online: true,
+        lastSeen: Date.now(),
+        computerId: socket.computerId,
+        data: message.data,
+      };
+      broadcastToBrowsers({ type: "matrix_state", matrix: state.matrix });
       return;
     }
 
@@ -135,8 +230,20 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    const isStorageSource = socket.role === "storage_node" || socket.role === "reactor";
+    if (message.type === "turbine_status" && socket.role === "turbine") {
+      const key = computerKey(socket.role, socket.computerId);
+      turbineUnits.set(key, {
+        online: true,
+        lastSeen: Date.now(),
+        computerId: socket.computerId,
+        data: message.data,
+      });
+      state.turbines = [...turbineUnits.values()];
+      broadcastToBrowsers({ type: "turbines_state", turbines: state.turbines });
+      return;
+    }
 
+    const isStorageSource = socket.role === "storage_node" || socket.role === "reactor";
     if (message.type === "storage_status" && isStorageSource) {
       state.storage.online = true;
       state.storage.lastSeen = Date.now();
@@ -157,10 +264,7 @@ websocketServer.on("connection", (socket) => {
     }
 
     if (message.type === "storage_begin" && isStorageSource) {
-      storageSnapshots.set(socket, {
-        id: message.snapshotId,
-        items: [],
-      });
+      storageSnapshots.set(socket, { id: message.snapshotId, items: [] });
       return;
     }
 
@@ -175,7 +279,6 @@ websocketServer.on("connection", (socket) => {
     if (message.type === "storage_end" && isStorageSource) {
       const snapshot = storageSnapshots.get(socket);
       if (snapshot?.id !== message.snapshotId) return;
-
       state.storage.items = snapshot.items;
       state.storage.updatedAt = Date.now();
       state.storage.online = true;
@@ -199,21 +302,8 @@ websocketServer.on("connection", (socket) => {
         startPercent: message.startPercent,
         stopPercent: message.stopPercent,
       };
-
-      let recipients = 0;
-      for (const reactor of reactorClients) {
-        if (reactor.readyState === WebSocket.OPEN) {
-          send(reactor, command);
-          recipients += 1;
-        }
-      }
-
-      if (recipients === 0) {
-        send(socket, {
-          type: "command_result",
-          ok: false,
-          message: "Reactor computer is offline",
-        });
+      if (sendToRole("reactor", command) === 0) {
+        send(socket, { type: "command_result", ok: false, message: "Reactor computer is offline" });
       }
       return;
     }
@@ -226,42 +316,72 @@ websocketServer.on("connection", (socket) => {
         at: Date.now(),
       };
       broadcastToBrowsers({ type: "command_result", ...state.lastCommand });
+      return;
+    }
+
+    if (message.type === "console_command" && socket.role === "browser") {
+      routeConsoleCommand(socket, message);
+      return;
+    }
+
+    if (message.type === "console_output" && socket.role !== "browser") {
+      const output = {
+        type: "console_output",
+        requestId: message.requestId || null,
+        target: message.target || socket.role,
+        computerId: message.computerId ?? socket.computerId,
+        ok: message.ok === true,
+        output: String(message.output || ""),
+        at: Date.now(),
+      };
+      state.consoleHistory.push(output);
+      if (state.consoleHistory.length > CONSOLE_HISTORY_LIMIT) state.consoleHistory.shift();
+      broadcastToBrowsers(output);
     }
   });
 
   socket.on("close", () => {
     clients.delete(socket);
-    reactorClients.delete(socket);
-    storageClients.delete(socket);
+    roleClients.get(socket.role)?.delete(socket);
     storageSnapshots.delete(socket);
 
-    if (socket.role === "reactor" && reactorClients.size === 0) {
-      state.reactor.online = false;
-      broadcastToBrowsers({ type: "reactor_state", reactor: state.reactor });
-    }
-    if (socket.role === "storage_node" && storageClients.size === 0) {
-      state.storage.online = false;
-      broadcastToBrowsers({
-        type: "storage_status",
-        storage: { online: false, connected: state.storage.connected },
-      });
+    if (socket.role !== "browser" && socket.role !== "unknown") {
+      const key = computerKey(socket.role, socket.computerId);
+      const replacement = [...(roleClients.get(socket.role) || [])]
+        .some((candidate) => candidate.computerId === socket.computerId);
+      if (!replacement && state.computers[key]) state.computers[key].online = false;
+      broadcastComputers();
     }
   });
 });
 
 setInterval(() => {
   const now = Date.now();
-  if (state.reactor.online && now - state.reactor.lastSeen > OFFLINE_AFTER_MS) {
-    state.reactor.online = false;
-    broadcastToBrowsers({ type: "reactor_state", reactor: state.reactor });
+  for (const computer of Object.values(state.computers)) {
+    if (computer.online && now - computer.lastSeen > OFFLINE_AFTER_MS) computer.online = false;
   }
-  if (state.storage.online && now - state.storage.lastSeen > OFFLINE_AFTER_MS) {
-    state.storage.online = false;
-    broadcastToBrowsers({
-      type: "storage_status",
-      storage: { online: false, connected: state.storage.connected },
-    });
+  if (state.matrix.online && now - state.matrix.lastSeen > OFFLINE_AFTER_MS) state.matrix.online = false;
+  if (state.reactor.online && now - state.reactor.lastSeen > OFFLINE_AFTER_MS) state.reactor.online = false;
+  if (state.storage.online && now - state.storage.lastSeen > OFFLINE_AFTER_MS) state.storage.online = false;
+  for (const unit of turbineUnits.values()) {
+    if (unit.online && now - unit.lastSeen > OFFLINE_AFTER_MS) unit.online = false;
   }
+  state.turbines = [...turbineUnits.values()];
+  broadcastToBrowsers({
+    type: "system_status",
+    matrix: state.matrix,
+    reactor: state.reactor,
+    turbines: state.turbines,
+    computers: state.computers,
+    storage: {
+      online: state.storage.online,
+      connected: state.storage.connected,
+      lastSeen: state.storage.lastSeen,
+      computerId: state.storage.computerId,
+      details: state.storage.details,
+      updatedAt: state.storage.updatedAt,
+    },
+  });
 }, 2_000);
 
 app.get("/api/state", (request, response) => {
@@ -274,9 +394,7 @@ app.get("/health", (_request, response) => response.json({ ok: true }));
 
 if (existsSync(join(distDirectory, "index.html"))) {
   app.use(express.static(distDirectory));
-  app.get("*", (_request, response) => {
-    response.sendFile(join(distDirectory, "index.html"));
-  });
+  app.get("*", (_request, response) => response.sendFile(join(distDirectory, "index.html")));
 } else {
   app.get("/", (_request, response) => {
     response.type("text").send("Dashboard is not built. Run: npm run build");

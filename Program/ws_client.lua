@@ -1,6 +1,7 @@
 -- Shared asynchronous WebSocket client for CC:Tweaked services.
 local Client = {}
 Client.__index = Client
+local CONNECT_TIMEOUT_MS = 15 * 1000
 
 function Client.new(role)
     settings.define("kenzu.serverUrl", {
@@ -31,17 +32,27 @@ function Client:isConnected()
 end
 
 function Client:connect()
-    if self.socket or self.connecting or not http then
+    if self.socket or not http then
         return false
     end
 
     local now = os.epoch("utc")
+    if self.connecting and now - self.lastAttempt >= CONNECT_TIMEOUT_MS then
+        self.connecting = false
+        self.lastError = "WebSocket connection timed out"
+    end
+    if self.connecting then
+        return false
+    end
     if now - self.lastAttempt < 5000 then
         return false
     end
 
     self.lastAttempt = now
-    local started, requestError = http.websocketAsync(self.url)
+    local started, requestError = http.websocketAsync({
+        url = self.url,
+        timeout = 10,
+    })
     if not started then
         self.lastError = requestError or "WebSocket request rejected"
         return false
@@ -102,6 +113,13 @@ function Client:handleEvent(event, arg1, arg2, arg3)
         if not decoded then
             self.lastError = "Invalid server JSON: " .. tostring(decodeError)
             return "invalid_message"
+        end
+        if decoded.type == "auth_error" then
+            self.lastError = tostring(decoded.message or "Invalid access token")
+            if self.socket then pcall(self.socket.close) end
+            self.socket = nil
+            self.connecting = false
+            return "disconnected"
         end
         return "message", decoded
     end

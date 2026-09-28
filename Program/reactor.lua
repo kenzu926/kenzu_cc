@@ -4,11 +4,14 @@ local REACTOR_NAME = "fissionReactorLogicAdapter_0"
 local MONITOR_NAME = "monitor_0"
 local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
 local ME_STORAGE_PROTOCOL = "kenzu_cc.me_storage"
+local CONSOLE_REQUEST_PROTOCOL = "kenzu_cc.console.request"
+local CONSOLE_RESPONSE_PROTOCOL = "kenzu_cc.console.response"
 local REMOTE_NODE_NAME = "computer_1"
 local REMOTE_TIMEOUT = 7 * 1000
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
+local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local server = WebSocketClient.new("reactor")
 
 local SETTINGS_FILE = "reactor.settings"
@@ -227,10 +230,29 @@ local function safeNumber(method, fallback)
 end
 
 local function sendReactorStatus()
+    local storedEnergy = safeNumber(matrix.getEnergy)
+    local capacity = safeNumber(matrix.getMaxEnergy)
+    local input = safeNumber(matrix.getLastInput)
+    local output = safeNumber(matrix.getLastOutput)
+
+    server:send({
+        type = "matrix_status",
+        data = {
+            name = MATRIX_NAME,
+            energyPercent = energy * 100,
+            storedEnergy = storedEnergy,
+            capacity = capacity,
+            input = input,
+            output = output,
+            net = input - output,
+            energyNeeded = safeNumber(matrix.getEnergyNeeded),
+        },
+    })
+
     server:send({
         type = "reactor_status",
         data = {
-            energyPercent = energy * 100,
+            name = REACTOR_NAME,
             running = reactorRunning,
             startPercent = startPercent,
             stopPercent = stopPercent,
@@ -240,9 +262,39 @@ local function sendReactorStatus()
             wastePercent = safeNumber(reactor.getWasteFilledPercentage) * 100,
             burnRate = safeNumber(reactor.getBurnRate),
             actualBurnRate = safeNumber(reactor.getActualBurnRate),
+            maxBurnRate = safeNumber(reactor.getMaxBurnRate),
+            fuelPercent = safeNumber(reactor.getFuelFilledPercentage) * 100,
+            heatedCoolantPercent = safeNumber(reactor.getHeatedCoolantFilledPercentage) * 100,
+            heatingRate = safeNumber(reactor.getHeatingRate),
+            environmentalLoss = safeNumber(reactor.getEnvironmentalLoss),
+            boilEfficiency = safeNumber(reactor.getBoilEfficiency) * 100,
             remoteComputerOnline = isRemoteOnline(),
             remoteMEConnected = remoteMEConnected,
         },
+    })
+end
+
+local function consoleStatus()
+    return table.concat({
+        "Service: reactor controller",
+        "Matrix: " .. MATRIX_NAME,
+        ("Energy: %.2f%%"):format(energy * 100),
+        "Reactor: " .. (reactorRunning and "ONLINE" or "SCRAMMED"),
+        ("Thresholds: %d%% / %d%%"):format(startPercent, stopPercent),
+        "ME node: " .. (isRemoteOnline() and "ONLINE" or "OFFLINE"),
+        "Web: " .. (server:isConnected() and "CONNECTED" or "OFFLINE"),
+    }, "\n")
+end
+
+local function handleConsoleCommand(command)
+    local ok, output = SafeConsole.execute(command.command, consoleStatus)
+    server:send({
+        type = "console_output",
+        requestId = command.requestId,
+        target = "reactor",
+        computerId = os.getComputerID(),
+        ok = ok,
+        output = output,
     })
 end
 
@@ -266,10 +318,20 @@ local function handleServerCommand(command)
             return
         end
 
+        local stopIncreased = newStop > stopPercent
         startPercent = math.floor(newStart)
         stopPercent = math.floor(newStop)
         saveThresholds()
-        message = "Thresholds updated from web"
+        energy = matrix.getEnergyFilledPercentage()
+        if stopIncreased and stoppedForHighEnergy
+            and not reactorRunning and energy < stopPercent / 100 then
+            reactor.activate()
+            reactorRunning = true
+            stoppedForHighEnergy = false
+            message = "Started: web stop level raised"
+        else
+            message = "Thresholds updated from web"
+        end
         sendCommandResult(command, true, "Thresholds saved")
         return
     end
@@ -383,13 +445,21 @@ while true do
     elseif serverEvent == "disconnected" then
         message = "Web server disconnected"
         drawScreen()
-    elseif serverEvent == "message"
-        and type(serverMessage) == "table"
-        and serverMessage.type == "command" then
-        handleServerCommand(serverMessage)
-        updateController()
-        sendReactorStatus()
-        drawScreen()
+    elseif serverEvent == "message" and type(serverMessage) == "table" then
+        if serverMessage.type == "command" then
+            handleServerCommand(serverMessage)
+            updateController()
+            sendReactorStatus()
+            drawScreen()
+        elseif serverMessage.type == "console_command"
+            and (serverMessage.target == "reactor"
+                or serverMessage.target == tostring(os.getComputerID())) then
+            handleConsoleCommand(serverMessage)
+        elseif serverMessage.type == "console_command"
+            and serverMessage.target == "storage_node"
+            and wirelessModemName then
+            rednet.broadcast(serverMessage, CONSOLE_REQUEST_PROTOCOL)
+        end
     end
 
     if event == "timer" and arg1 == timer then
@@ -424,6 +494,12 @@ while true do
             and (payload.type == "storage_begin"
                 or payload.type == "storage_chunk"
                 or payload.type == "storage_end") then
+            server:send(payload)
+        end
+    elseif event == "rednet_message" and arg3 == CONSOLE_RESPONSE_PROTOCOL then
+        local payload = arg2
+        if type(payload) == "table" and payload.type == "console_output" then
+            payload.computerId = payload.computerId or arg1
             server:send(payload)
         end
     end

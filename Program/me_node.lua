@@ -1,6 +1,8 @@
 -- Remote ME-system status and storage node for computer_1.
 local REDNET_PROTOCOL = "kenzu_cc.me_status"
 local STORAGE_REDNET_PROTOCOL = "kenzu_cc.me_storage"
+local CONSOLE_REQUEST_PROTOCOL = "kenzu_cc.console.request"
+local CONSOLE_RESPONSE_PROTOCOL = "kenzu_cc.console.response"
 local NODE_NAME = "computer_1"
 local HEARTBEAT_INTERVAL = 2
 local STORAGE_INTERVAL = 5
@@ -8,6 +10,7 @@ local STORAGE_CHUNK_SIZE = 100
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
+local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local server = WebSocketClient.new("storage_node")
 
 local function findWirelessModem()
@@ -191,6 +194,35 @@ local function drawStatus()
     end
 end
 
+local function consoleStatus()
+    return table.concat({
+        "Service: ME storage node",
+        "Computer: " .. NODE_NAME,
+        "ME: " .. (meConnected and "CONNECTED" or "DISCONNECTED"),
+        "Uplink: " .. (server:isConnected() and "DIRECT" or "REDNET RELAY"),
+        "Details: " .. meDetails,
+        "Storage: " .. storageDetails,
+    }, "\n")
+end
+
+local function executeConsoleCommand(command, replyOverRednet)
+    local ok, output = SafeConsole.execute(command.command, consoleStatus)
+    local response = {
+        type = "console_output",
+        requestId = command.requestId,
+        target = "storage_node",
+        computerId = os.getComputerID(),
+        ok = ok,
+        output = output,
+    }
+
+    if replyOverRednet and modemName then
+        rednet.broadcast(response, CONSOLE_RESPONSE_PROTOCOL)
+    else
+        server:send(response)
+    end
+end
+
 server:connect()
 sendStatus()
 drawStatus()
@@ -200,7 +232,7 @@ local storageTimer = os.startTimer(1)
 
 while true do
     local event, arg1, arg2, arg3 = os.pullEvent()
-    local serverEvent = server:handleEvent(event, arg1, arg2, arg3)
+    local serverEvent, serverMessage = server:handleEvent(event, arg1, arg2, arg3)
 
     if serverEvent == "connected" then
         sendStatus()
@@ -208,6 +240,11 @@ while true do
         drawStatus()
     elseif serverEvent == "disconnected" then
         drawStatus()
+    elseif serverEvent == "message" and type(serverMessage) == "table"
+        and serverMessage.type == "console_command"
+        and (serverMessage.target == "storage_node"
+            or serverMessage.target == tostring(os.getComputerID())) then
+        executeConsoleCommand(serverMessage, false)
     end
 
     if event == "timer" and arg1 == heartbeatTimer then
@@ -225,5 +262,12 @@ while true do
         end
         sendStatus()
         drawStatus()
+    elseif event == "rednet_message" and arg3 == CONSOLE_REQUEST_PROTOCOL then
+        local command = arg2
+        if type(command) == "table" and command.type == "console_command"
+            and (command.target == "storage_node"
+                or command.target == tostring(os.getComputerID())) then
+            executeConsoleCommand(command, true)
+        end
     end
 end

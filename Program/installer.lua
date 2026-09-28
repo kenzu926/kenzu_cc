@@ -10,8 +10,10 @@ local REPOSITORY_BASE_URL =
 local FILES = {
     "startup.lua",
     "ws_client.lua",
+    "console.lua",
     "reactor.lua",
     "me_node.lua",
+    "turbine.lua",
 }
 
 local installDirectory = shell.dir()

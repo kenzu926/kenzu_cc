@@ -1,14 +1,25 @@
 -- Project service launcher.
 -- installer.lua is responsible for downloading and updating these files.
-local function isReactorComputer()
-    return peripheral.find("inductionPort") ~= nil
-        or peripheral.find("fissionReactorLogicAdapter") ~= nil
-end
-
 local function reactorIsReady()
     return peripheral.find("inductionPort") ~= nil
         and peripheral.find("fissionReactorLogicAdapter") ~= nil
         and peripheral.find("monitor") ~= nil
+end
+
+local function meNodeIsReady()
+    if peripheral.find("meBridge") or peripheral.find("me_bridge") then return true end
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:match("^ae2:controller") then return true end
+    end
+    return false
+end
+
+local function turbineIsReady()
+    if peripheral.find("turbineValve") ~= nil then return true end
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:lower():find("turbine") then return true end
+    end
+    return false
 end
 
 local PROGRAMS = {
@@ -20,9 +31,12 @@ local PROGRAMS = {
     {
         path = "me_node.lua",
         title = "ME Node",
-        shouldRun = function()
-            return not isReactorComputer()
-        end,
+        shouldRun = meNodeIsReady,
+    },
+    {
+        path = "turbine.lua",
+        title = "Turbine",
+        shouldRun = turbineIsReady,
     },
 }
 
