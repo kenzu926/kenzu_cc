@@ -34,7 +34,7 @@ local function findMEPeripheral()
                 return controller.getKenzuApiVersion()
             end)
             if ok and version then
-                return controller, "Kenzu AE2 API " .. tostring(version), true
+                return controller, "Kenzu AE2 API " .. tostring(version), true, tostring(version)
             end
         end
     end
@@ -52,31 +52,43 @@ local function findMEPeripheral()
 end
 
 local function getMEStatus()
-    local device, deviceName, isBridge = findMEPeripheral()
+    local device, deviceName, isBridge, detectedAddonVersion = findMEPeripheral()
     if not device then
-        return false, "ME peripheral not found", nil
+        return false, "ME peripheral not found", nil, false, nil
     end
 
     if isBridge and device.isConnected then
         local ok, connected = pcall(device.isConnected)
         if not ok then
-            return false, tostring(connected), device
+            return false, tostring(connected), device,
+                detectedAddonVersion ~= nil, detectedAddonVersion
         end
         return connected == true,
-            connected and "Connected via ME Bridge" or "ME network offline",
-            device
+            connected and (detectedAddonVersion
+                and "Connected via Kenzu CC Bridge" or "Connected via ME Bridge")
+                or "ME network offline",
+            device,
+            detectedAddonVersion ~= nil,
+            detectedAddonVersion
     end
 
     local storageMethod = isBridge and (device.getMaxItemStorage or device.getTotalItemStorage)
     if storageMethod then
         local ok, storage = pcall(storageMethod)
         if ok and storage ~= nil then
-            return true, "Connected via ME Bridge", device
+            return true,
+                detectedAddonVersion and "Connected via Kenzu CC Bridge"
+                    or "Connected via ME Bridge",
+                device,
+                detectedAddonVersion ~= nil,
+                detectedAddonVersion
         end
-        return false, tostring(storage or "ME network offline"), device
+        return false, tostring(storage or "ME network offline"), device,
+            detectedAddonVersion ~= nil, detectedAddonVersion
     end
 
-    return peripheral.isPresent(deviceName), "Connected via " .. deviceName, device
+    return peripheral.isPresent(deviceName), "Connected via " .. deviceName, device,
+        false, nil
 end
 
 local modemName = findWirelessModem()
@@ -87,6 +99,8 @@ end
 local meConnected = false
 local meDetails = "Waiting for ME system"
 local meDevice = nil
+local addonConnected = false
+local addonVersion = nil
 local storageDetails = "Waiting for first item scan"
 local storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
 local storageCellSource = "none"
@@ -200,7 +214,7 @@ local function refreshStorageMetrics()
 end
 
 local function sendStatus()
-    meConnected, meDetails, meDevice = getMEStatus()
+    meConnected, meDetails, meDevice, addonConnected, addonVersion = getMEStatus()
 
     if modemName then
         rednet.broadcast({
@@ -209,6 +223,8 @@ local function sendStatus()
             node = NODE_NAME,
             computerId = os.getComputerID(),
             meConnected = meConnected,
+            apiModConnected = addonConnected,
+            apiModVersion = addonVersion,
             details = meDetails .. " | " .. storageDetails,
             metrics = storageMetrics,
         }, REDNET_PROTOCOL)
@@ -217,6 +233,8 @@ local function sendStatus()
     server:send({
         type = "storage_status",
         connected = meConnected,
+        apiModConnected = addonConnected,
+        apiModVersion = addonVersion,
         details = meDetails .. " | " .. storageDetails,
         metrics = storageMetrics,
     })
@@ -314,6 +332,8 @@ local function drawStatus()
     print("Rednet ID: " .. os.getComputerID())
     print("Modem: " .. tostring(modemName or "NOT FOUND"))
     print("ME System: " .. (meConnected and "CONNECTED" or "DISCONNECTED"))
+    print("Kenzu API mod: " .. (addonConnected
+        and ("ACTIVE v" .. tostring(addonVersion)) or "NOT DETECTED"))
     local uplink = server:isConnected() and "DIRECT"
         or (modemName and "REDNET RELAY" or "OFFLINE")
     print("Web uplink: " .. uplink)
@@ -329,6 +349,8 @@ local function consoleStatus()
         "Service: ME storage node",
         "Computer: " .. NODE_NAME,
         "ME: " .. (meConnected and "CONNECTED" or "DISCONNECTED"),
+        "Kenzu API mod: " .. (addonConnected
+            and ("ACTIVE v" .. tostring(addonVersion)) or "NOT DETECTED"),
         "Uplink: " .. (server:isConnected() and "DIRECT" or "REDNET RELAY"),
         "Details: " .. meDetails,
         "Storage: " .. storageDetails,
