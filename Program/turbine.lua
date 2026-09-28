@@ -2,6 +2,8 @@
 local CHECK_INTERVAL = 2
 local JOULES_PER_FE = 2.5
 local OVERVIEW_TURBINE_PROTOCOL = "kenzu_cc.overview.turbines"
+local MATRIX_NAME = "inductionPort_0"
+local REACTOR_NAME = "fissionReactorLogicAdapter_0"
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
@@ -110,10 +112,37 @@ local function sendStatus()
     local statuses = readStatuses()
     server:send({ type = "turbines_status", turbines = statuses })
     if wirelessModemName then
+        local matrix = peripheral.wrap(MATRIX_NAME)
+        local reactor = peripheral.wrap(REACTOR_NAME)
+        local matrixData
+        local reactorData
+        if matrix then
+            matrixData = {
+                energyPercent = safeNumber(matrix, "getEnergyFilledPercentage") * 100,
+                storedEnergy = safeNumber(matrix, "getEnergy") / JOULES_PER_FE,
+                capacity = safeNumber(matrix, "getMaxEnergy") / JOULES_PER_FE,
+                input = safeNumber(matrix, "getLastInput") / JOULES_PER_FE,
+                output = safeNumber(matrix, "getLastOutput") / JOULES_PER_FE,
+            }
+        end
+        if reactor then
+            local statusOk, running = pcall(reactor.getStatus)
+            reactorData = {
+                running = statusOk and running == true,
+                temperature = safeNumber(reactor, "getTemperature"),
+                actualBurnRate = safeNumber(reactor, "getActualBurnRate"),
+                coolantPercent = safeNumber(reactor, "getCoolantFilledPercentage") * 100,
+                fuelPercent = safeNumber(reactor, "getFuelFilledPercentage") * 100,
+                wastePercent = safeNumber(reactor, "getWasteFilledPercentage") * 100,
+                damage = safeNumber(reactor, "getDamagePercent"),
+            }
+        end
         rednet.broadcast({
             version = 1,
             computerId = os.getComputerID(),
             turbines = statuses,
+            matrix = matrixData,
+            reactor = reactorData,
         }, OVERVIEW_TURBINE_PROTOCOL)
     end
 

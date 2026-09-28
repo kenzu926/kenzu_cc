@@ -42,17 +42,21 @@ end
 local hasRednet = openWirelessModem()
 
 local function findMEBridge()
+    -- Match the same peripherals as me_node.lua, including the server-side
+    -- addon which is exposed under an ae2:controller_* name.
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:match("^ae2:controller") then
+            local controller = peripheral.wrap(name)
+            local ok, version = pcall(function() return controller.getKenzuApiVersion() end)
+            if ok and version then return controller end
+        end
+    end
+    local bridge = peripheral.find("meBridge") or peripheral.find("me_bridge")
+    if bridge then return bridge end
     local exact = peripheral.wrap(ME_NAME)
     if exact then return exact end
     for _, name in ipairs(peripheral.getNames()) do
-        local device = peripheral.wrap(name)
-        local lower = name:lower()
-        if device and (lower:find("mebridge", 1, true)
-                or device.getStorageStats
-                or device.getMaxItemStorage
-                or device.getTotalItemStorage) then
-            return device
-        end
+        if name:match("^ae2:controller") then return peripheral.wrap(name) end
     end
 end
 
@@ -279,40 +283,55 @@ local function draw()
     monitor.setBackgroundColor(colors.black)
     monitor.clear()
 
+    local tall = height >= 56
+    local rows = tall and 3 or 2
+    local storageY = math.max(49, height - 9)
+    local y = tall and {
+        matrix = 7, matrixValue = 9, matrixMeter = 10, matrixFlow = 15,
+        reactor = 17, reactorState = 19, water = 21, fuel = 26, waste = 31,
+        turbines = 36, turbineValue = 38, flow = 39, steam = 44,
+        storage = storageY, storageState = storageY + 2, storageMeter = storageY + 3,
+    } or {
+        matrix = 7, matrixValue = 9, matrixMeter = 10, matrixFlow = 14,
+        reactor = 16, reactorState = 18, water = 20, fuel = 24, waste = 28,
+        turbines = 32, turbineValue = 34, flow = 35, steam = 39,
+        storage = 43, storageState = 45, storageMeter = 46,
+    }
+
     fill(1, 1, width, 5, colors.gray)
     centered(2, 'ATM9 - "Maids in stockings"(gornichnyye v chulochkakh)', colors.cyan, colors.gray)
     text(3, 4, moscowDateTime() .. " MSK", colors.white, colors.gray)
     local up = uptime()
     text(math.max(3, width - #up - 1), 4, up, colors.lightGray, colors.gray)
 
-    sectionHeader(7, " INDUCTION MATRIX", matrixSource, colors.lightBlue)
-    text(3, 9, ("%s / %s FE"):format(shorten(stored), shorten(capacity)), colors.white)
-    meter(10, "ENERGY", energy, energy >= 95 and colors.orange or colors.lime, 2)
-    text(3, 14, ("IN %s FE/t   OUT %s FE/t   NET %s"):format(
+    sectionHeader(y.matrix, " INDUCTION MATRIX", matrixSource, colors.lightBlue)
+    text(3, y.matrixValue, ("%s / %s FE"):format(shorten(stored), shorten(capacity)), colors.white)
+    meter(y.matrixMeter, "ENERGY", energy, energy >= 95 and colors.orange or colors.lime, rows)
+    text(3, y.matrixFlow, ("IN %s FE/t   OUT %s FE/t   NET %s"):format(
         shorten(input), shorten(output), shorten(input - output)), colors.lightGray)
 
-    sectionHeader(16, " FISSION REACTOR", reactorSource, colors.yellow)
+    sectionHeader(y.reactor, " FISSION REACTOR", reactorSource, colors.yellow)
     local running = reactorData.running == true
-    text(3, 18, running and "ONLINE" or "SCRAMMED", running and colors.lime or colors.red)
-    text(16, 18, ("TEMP %.0f K  BURN %.2f mB/t  DAMAGE %.1f%%"):format(
+    text(3, y.reactorState, running and "ONLINE" or "SCRAMMED", running and colors.lime or colors.red)
+    text(16, y.reactorState, ("TEMP %.0f K  BURN %.2f mB/t  DAMAGE %.1f%%"):format(
         tonumber(reactorData.temperature) or 0,
         tonumber(reactorData.actualBurnRate) or 0,
         tonumber(reactorData.damage) or 0), colors.lightGray)
-    meter(20, "WATER", reactorData.coolantPercent, colors.blue, 2)
-    meter(24, "FUEL", reactorData.fuelPercent, colors.green, 2)
-    meter(28, "WASTE", reactorData.wastePercent, colors.red, 2)
+    meter(y.water, "WATER", reactorData.coolantPercent, colors.blue, rows)
+    meter(y.fuel, "FUEL", reactorData.fuelPercent, colors.green, rows)
+    meter(y.waste, "WASTE", reactorData.wastePercent, colors.red, rows)
 
-    sectionHeader(32, " TURBINES", turbineSource, colors.purple)
-    text(3, 34, ("%d UNITS   GENERATION %s FE/t"):format(turbines.count, shorten(turbines.production)), colors.white)
+    sectionHeader(y.turbines, " TURBINES", turbineSource, colors.purple)
+    text(3, y.turbineValue, ("%d UNITS   GENERATION %s FE/t"):format(turbines.count, shorten(turbines.production)), colors.white)
     local flowPercent = turbines.maxFlow > 0 and turbines.flow / turbines.maxFlow * 100 or 0
-    meter(35, ("FLOW %s/%s mB/t"):format(shorten(turbines.flow), shorten(turbines.maxFlow)), flowPercent, colors.purple, 2)
-    meter(39, "STEAM BUFFER", turbines.steam, colors.lightBlue, 2)
+    meter(y.flow, ("FLOW %s/%s mB/t"):format(shorten(turbines.flow), shorten(turbines.maxFlow)), flowPercent, colors.purple, rows)
+    meter(y.steam, "STEAM BUFFER", turbines.steam, colors.lightBlue, rows)
 
-    sectionHeader(43, " AE2 STORAGE", meSource, colors.cyan)
+    sectionHeader(y.storage, " AE2 STORAGE", meSource, colors.cyan)
     local storagePercent = storage.total > 0 and storage.used / storage.total * 100 or 0
-    text(3, 45, storage.connected and ("CONNECTED   CELLS " .. storage.cells) or "DISCONNECTED",
+    text(3, y.storageState, storage.connected and ("CONNECTED   CELLS " .. storage.cells) or "DISCONNECTED",
         storage.connected and colors.lime or colors.red)
-    meter(46, ("USED %s/%s"):format(shorten(storage.used), shorten(storage.total)), storagePercent, colors.cyan, 2)
+    meter(y.storageMeter, ("USED %s/%s"):format(shorten(storage.used), shorten(storage.total)), storagePercent, colors.cyan, rows)
 
     fill(1, height, width, height, colors.gray)
     text(2, height, hasRednet and "REDNET LINK ACTIVE" or "REDNET LINK OFFLINE",
@@ -339,7 +358,16 @@ while true do
         draw()
     elseif event == "rednet_message" and arg3 == TURBINE_PROTOCOL and type(arg2) == "table" then
         remoteTurbines = arg2.turbines
-        turbineHeartbeat = os.epoch("utc")
+        local now = os.epoch("utc")
+        turbineHeartbeat = now
+        if type(arg2.matrix) == "table" then
+            remoteMatrix = arg2.matrix
+            reactorHeartbeat = now
+        end
+        if type(arg2.reactor) == "table" then
+            remoteReactor = arg2.reactor
+            reactorHeartbeat = now
+        end
         draw()
     elseif event == "rednet_message" and arg3 == SNAPSHOT_PROTOCOL and type(arg2) == "table" then
         local now = os.epoch("utc")
