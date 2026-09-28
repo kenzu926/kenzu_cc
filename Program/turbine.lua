@@ -41,6 +41,15 @@ local function safeNumber(device, methodName, fallback)
     return ok and (tonumber(value) or fallback or 0) or (fallback or 0)
 end
 
+local function safeAmount(device, methodName)
+    local method = device and device[methodName]
+    if not method then return 0 end
+    local ok, value = pcall(method)
+    if not ok then return 0 end
+    if type(value) == "table" then return tonumber(value.amount or value[1]) or 0 end
+    return tonumber(value) or 0
+end
+
 local function readTurbine(entry)
     local turbine = entry.device
     return {
@@ -49,6 +58,8 @@ local function readTurbine(entry)
         flowRate = safeNumber(turbine, "getFlowRate"),
         maxFlowRate = safeNumber(turbine, "getMaxFlowRate"),
         steamPercent = safeNumber(turbine, "getSteamFilledPercentage") * 100,
+        steam = safeAmount(turbine, "getSteam"),
+        steamCapacity = safeNumber(turbine, "getSteamCapacity"),
         energyPercent = safeNumber(turbine, "getEnergyFilledPercentage") * 100,
         blades = safeNumber(turbine, "getBlades"),
         coils = safeNumber(turbine, "getCoils"),

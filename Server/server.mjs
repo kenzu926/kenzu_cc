@@ -34,6 +34,7 @@ const state = {
     connected: false,
     details: "Waiting for storage node",
     items: [],
+    metrics: { total: 0, used: 0, available: 0, cells: [] },
     updatedAt: null,
   },
   computers: {},
@@ -121,12 +122,23 @@ function broadcastComputers() {
 }
 
 function validateCommand(message) {
-  const allowed = new Set(["reactor_start", "reactor_scram", "set_thresholds", "set_burn_rate"]);
+  const allowed = new Set(["reactor_start", "reactor_scram", "set_thresholds", "set_burn_rate", "set_safety"]);
   if (!allowed.has(message.action)) return "Unknown command";
   if (message.action === "set_burn_rate") {
     const burnRate = Number(message.burnRate);
     if (!Number.isFinite(burnRate) || burnRate < 0 || burnRate > 1_000_000) {
       return "Burn rate must be a positive number";
+    }
+    return null;
+  }
+  if (message.action === "set_safety") {
+    const steam = Number(message.steamStopPercent);
+    const water = Number(message.waterStopPercent);
+    const fuel = Number(message.fuelStopPercent);
+    if (!Number.isFinite(steam) || steam < 1 || steam > 100
+      || !Number.isFinite(water) || water < 0 || water > 99
+      || !Number.isFinite(fuel) || fuel < 0 || fuel > 99) {
+      return "Safety thresholds are invalid";
     }
     return null;
   }
@@ -412,6 +424,9 @@ websocketServer.on("connection", (socket) => {
       state.storage.computerId = message.computerId ?? socket.computerId;
       state.storage.connected = message.connected === true;
       state.storage.details = message.details || "";
+      if (message.metrics && typeof message.metrics === "object") {
+        state.storage.metrics = message.metrics;
+      }
       broadcastToBrowsers({
         type: "storage_status",
         storage: {
@@ -420,6 +435,7 @@ websocketServer.on("connection", (socket) => {
           computerId: state.storage.computerId,
           connected: state.storage.connected,
           details: state.storage.details,
+          metrics: state.storage.metrics,
         },
       });
       return;
@@ -464,6 +480,13 @@ websocketServer.on("connection", (socket) => {
         startPercent: message.startPercent,
         stopPercent: message.stopPercent,
         burnRate: message.burnRate,
+        energyEnabled: message.energyEnabled,
+        steamEnabled: message.steamEnabled,
+        waterEnabled: message.waterEnabled,
+        fuelEnabled: message.fuelEnabled,
+        steamStopPercent: message.steamStopPercent,
+        waterStopPercent: message.waterStopPercent,
+        fuelStopPercent: message.fuelStopPercent,
       };
       if (sendToRole("reactor", command) === 0) {
         send(socket, { type: "command_result", ok: false, message: "Reactor computer is offline" });
@@ -588,6 +611,7 @@ setInterval(() => {
       computerId: state.storage.computerId,
       details: state.storage.details,
       updatedAt: state.storage.updatedAt,
+      metrics: state.storage.metrics,
     },
   });
 }, 2_000);

@@ -32,11 +32,25 @@ settings.define("reactor.stopPercent", {
     default = 98,
     type = "number",
 })
+settings.define("reactor.safetyEnergyEnabled", { default = true, type = "boolean" })
+settings.define("reactor.safetySteamEnabled", { default = true, type = "boolean" })
+settings.define("reactor.safetyWaterEnabled", { default = true, type = "boolean" })
+settings.define("reactor.safetyFuelEnabled", { default = true, type = "boolean" })
+settings.define("reactor.steamStopPercent", { default = 95, type = "number" })
+settings.define("reactor.waterStopPercent", { default = 10, type = "number" })
+settings.define("reactor.fuelStopPercent", { default = 5, type = "number" })
 
 settings.load(SETTINGS_FILE)
 
 local startPercent = math.floor(settings.get("reactor.startPercent"))
 local stopPercent = math.floor(settings.get("reactor.stopPercent"))
+local safetyEnergyEnabled = settings.get("reactor.safetyEnergyEnabled")
+local safetySteamEnabled = settings.get("reactor.safetySteamEnabled")
+local safetyWaterEnabled = settings.get("reactor.safetyWaterEnabled")
+local safetyFuelEnabled = settings.get("reactor.safetyFuelEnabled")
+local steamStopPercent = math.max(1, math.min(100, settings.get("reactor.steamStopPercent")))
+local waterStopPercent = math.max(0, math.min(99, settings.get("reactor.waterStopPercent")))
+local fuelStopPercent = math.max(0, math.min(99, settings.get("reactor.fuelStopPercent")))
 
 -- Keep saved values valid and leave at least 1% between the thresholds.
 startPercent = math.max(0, math.min(99, startPercent))
@@ -78,7 +92,8 @@ end
 local width, height = monitor.getSize()
 local energy = 0
 local reactorRunning = false
-local stoppedForHighEnergy = false
+local stoppedForSafety = false
+local safetyStopReason = nil
 local message = wirelessModemName
     and "Controller started"
     or "Wireless modem not found"
@@ -91,6 +106,13 @@ local buttons = {}
 local function saveThresholds()
     settings.set("reactor.startPercent", startPercent)
     settings.set("reactor.stopPercent", stopPercent)
+    settings.set("reactor.safetyEnergyEnabled", safetyEnergyEnabled)
+    settings.set("reactor.safetySteamEnabled", safetySteamEnabled)
+    settings.set("reactor.safetyWaterEnabled", safetyWaterEnabled)
+    settings.set("reactor.safetyFuelEnabled", safetyFuelEnabled)
+    settings.set("reactor.steamStopPercent", steamStopPercent)
+    settings.set("reactor.waterStopPercent", waterStopPercent)
+    settings.set("reactor.fuelStopPercent", fuelStopPercent)
     settings.save(SETTINGS_FILE)
 end
 
@@ -198,6 +220,28 @@ local function drawScreen()
     monitor.setTextColor(colors.white)
 end
 
+local function readPercent(method, fallback)
+    if not method then return fallback or 0 end
+    local ok, value = pcall(method)
+    return ok and (tonumber(value) or fallback or 0) or (fallback or 0)
+end
+
+local function getSafetyStopReason()
+    if safetyEnergyEnabled and energy >= stopPercent / 100 then return "battery threshold" end
+    if safetySteamEnabled
+        and readPercent(reactor.getHeatedCoolantFilledPercentage) >= steamStopPercent / 100 then
+        return "heated coolant threshold"
+    end
+    if safetyWaterEnabled
+        and readPercent(reactor.getCoolantFilledPercentage) <= waterStopPercent / 100 then
+        return "coolant threshold"
+    end
+    if safetyFuelEnabled
+        and readPercent(reactor.getFuelFilledPercentage) <= fuelStopPercent / 100 then
+        return "fuel threshold"
+    end
+end
+
 local function updateController()
     energy = matrix.getEnergyFilledPercentage()
     local actualRunning = reactor.getStatus()
@@ -205,20 +249,26 @@ local function updateController()
     -- If the state changed outside this program, do not treat it as an
     -- automatic high-energy stop. This avoids undoing a manual/safety stop.
     if actualRunning ~= reactorRunning then
-        stoppedForHighEnergy = false
+        stoppedForSafety = false
+        safetyStopReason = nil
     end
     reactorRunning = actualRunning
 
-    if energy >= stopPercent / 100 and reactorRunning then
+    local stopReason = getSafetyStopReason()
+    if stopReason and reactorRunning then
         reactor.scram()
         reactorRunning = false
-        stoppedForHighEnergy = true
-        message = "Stopped: battery full"
-    elseif energy <= startPercent / 100 and not reactorRunning then
+        stoppedForSafety = true
+        safetyStopReason = stopReason
+        message = "Safety stop: " .. stopReason
+    elseif not stopReason and not reactorRunning
+        and (stoppedForSafety
+            or (safetyEnergyEnabled and energy <= startPercent / 100)) then
         reactor.activate()
         reactorRunning = true
-        stoppedForHighEnergy = false
-        message = "Started: battery low"
+        stoppedForSafety = false
+        safetyStopReason = nil
+        message = "Started: safety conditions restored"
     end
 end
 
@@ -292,6 +342,19 @@ local function sendReactorStatus()
             heatingRate = safeNumber(reactor.getHeatingRate),
             environmentalLoss = safeNumber(reactor.getEnvironmentalLoss),
             boilEfficiency = safeNumber(reactor.getBoilEfficiency) * 100,
+            safety = {
+                energyEnabled = safetyEnergyEnabled,
+                steamEnabled = safetySteamEnabled,
+                waterEnabled = safetyWaterEnabled,
+                fuelEnabled = safetyFuelEnabled,
+                energyStopPercent = stopPercent,
+                energyStartPercent = startPercent,
+                steamStopPercent = steamStopPercent,
+                waterStopPercent = waterStopPercent,
+                fuelStopPercent = fuelStopPercent,
+                stopped = stoppedForSafety,
+                reason = safetyStopReason,
+            },
             remoteComputerOnline = isRemoteOnline(),
             remoteMEConnected = remoteMEConnected,
         },
@@ -342,21 +405,36 @@ local function handleServerCommand(command)
             return
         end
 
-        local stopIncreased = newStop > stopPercent
         startPercent = math.floor(newStart)
         stopPercent = math.floor(newStop)
         saveThresholds()
-        energy = matrix.getEnergyFilledPercentage()
-        if stopIncreased and stoppedForHighEnergy
-            and not reactorRunning and energy < stopPercent / 100 then
-            reactor.activate()
-            reactorRunning = true
-            stoppedForHighEnergy = false
-            message = "Started: web stop level raised"
-        else
-            message = "Thresholds updated from web"
-        end
+        updateController()
+        message = "Thresholds updated from web"
         sendCommandResult(command, true, "Thresholds saved")
+        return
+    end
+
+    if command.action == "set_safety" then
+        local newSteam = tonumber(command.steamStopPercent)
+        local newWater = tonumber(command.waterStopPercent)
+        local newFuel = tonumber(command.fuelStopPercent)
+        if not newSteam or not newWater or not newFuel
+            or newSteam < 1 or newSteam > 100
+            or newWater < 0 or newWater > 99
+            or newFuel < 0 or newFuel > 99 then
+            sendCommandResult(command, false, "Invalid safety thresholds")
+            return
+        end
+        safetyEnergyEnabled = command.energyEnabled == true
+        safetySteamEnabled = command.steamEnabled == true
+        safetyWaterEnabled = command.waterEnabled == true
+        safetyFuelEnabled = command.fuelEnabled == true
+        steamStopPercent = math.floor(newSteam)
+        waterStopPercent = math.floor(newWater)
+        fuelStopPercent = math.floor(newFuel)
+        saveThresholds()
+        updateController()
+        sendCommandResult(command, true, "Safety settings saved")
         return
     end
 
@@ -364,7 +442,8 @@ local function handleServerCommand(command)
         local ok, commandError = pcall(reactor.scram)
         if ok then
             reactorRunning = false
-            stoppedForHighEnergy = false
+            stoppedForSafety = false
+            safetyStopReason = nil
             message = "SCRAM from web"
             sendCommandResult(command, true, "Reactor stopped")
         else
@@ -391,7 +470,8 @@ local function handleServerCommand(command)
         local ok, commandError = pcall(reactor.activate)
         if ok then
             reactorRunning = true
-            stoppedForHighEnergy = false
+            stoppedForSafety = false
+            safetyStopReason = nil
             message = "Started from web"
             sendCommandResult(command, true, "Reactor started")
         else
@@ -429,7 +509,6 @@ end
 
 local function handleTouch(x, y)
     local changed = false
-    local stopIncreased = false
 
     if isInside(buttons.startMinus, x, y) then
         startPercent = math.max(0, startPercent - 1)
@@ -442,28 +521,14 @@ local function handleTouch(x, y)
         changed = true
     elseif isInside(buttons.stopPlus, x, y) then
         local newStopPercent = math.min(100, stopPercent + 1)
-        stopIncreased = newStopPercent > stopPercent
         stopPercent = newStopPercent
-        changed = stopIncreased
+        changed = true
     end
 
     if changed then
         saveThresholds()
         message = "Thresholds saved"
         updateController()
-
-        -- Raising the stop threshold above the current charge cancels only a
-        -- stop previously caused by this controller. Normal hysteresis still
-        -- applies to manual and safety shutdowns.
-        if stopIncreased
-            and stoppedForHighEnergy
-            and not reactorRunning
-            and energy < stopPercent / 100 then
-            reactor.activate()
-            reactorRunning = true
-            stoppedForHighEnergy = false
-            message = "Started: stop level raised"
-        end
 
         drawScreen()
     end
@@ -528,6 +593,7 @@ while true do
                 connected = remoteMEConnected,
                 details = payload.details or "Connected through Rednet relay",
                 computerId = arg1,
+                metrics = payload.metrics,
             })
             drawScreen()
         end

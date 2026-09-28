@@ -73,6 +73,40 @@ local meConnected = false
 local meDetails = "Waiting for ME system"
 local meDevice = nil
 local storageDetails = "Waiting for first item scan"
+local storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
+
+local function safeCall(device, methodName, fallback)
+    local method = device and device[methodName]
+    if not method then return fallback end
+    local ok, value = pcall(method)
+    return ok and value ~= nil and value or fallback
+end
+
+local function refreshStorageMetrics()
+    if not meConnected or not meDevice then
+        storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
+        return
+    end
+    local cells = {}
+    local rawCells = safeCall(meDevice, "listCells", {})
+    if type(rawCells) == "table" then
+        for _, cell in pairs(rawCells) do
+            cells[#cells + 1] = {
+                item = cell.item or cell.name or "unknown",
+                cellType = cell.cellType or "item",
+                totalBytes = tonumber(cell.totalBytes) or 0,
+                usedBytes = tonumber(cell.usedBytes or cell.used) or nil,
+                bytesPerType = tonumber(cell.bytesPerType) or 0,
+            }
+        end
+    end
+    storageMetrics = {
+        total = tonumber(safeCall(meDevice, "getTotalItemStorage", 0)) or 0,
+        used = tonumber(safeCall(meDevice, "getUsedItemStorage", 0)) or 0,
+        available = tonumber(safeCall(meDevice, "getAvailableItemStorage", 0)) or 0,
+        cells = cells,
+    }
+end
 
 local function sendStatus()
     meConnected, meDetails, meDevice = getMEStatus()
@@ -85,6 +119,7 @@ local function sendStatus()
             computerId = os.getComputerID(),
             meConnected = meConnected,
             details = meDetails .. " | " .. storageDetails,
+            metrics = storageMetrics,
         }, REDNET_PROTOCOL)
     end
 
@@ -92,6 +127,7 @@ local function sendStatus()
         type = "storage_status",
         connected = meConnected,
         details = meDetails .. " | " .. storageDetails,
+        metrics = storageMetrics,
     })
 end
 
@@ -119,6 +155,8 @@ local function sendStorageSnapshot()
         storageDetails = "Item scan waiting for ME connection"
         return
     end
+
+    refreshStorageMetrics()
 
     local listMethod = meDevice.listItems
     local methodArguments = {}
