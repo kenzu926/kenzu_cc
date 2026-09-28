@@ -24,6 +24,12 @@ local function overviewMonitorIsReady()
     return peripheral.isPresent("monitor_1")
 end
 
+local function overviewRelayIsReady()
+    return peripheral.isPresent("inductionPort_0")
+        or peripheral.isPresent("fissionReactorLogicAdapter_0")
+        or turbineIsReady()
+end
+
 local PROGRAMS = {
     {
         path = "gateway.lua",
@@ -44,6 +50,11 @@ local PROGRAMS = {
         path = "overview_monitor.lua",
         title = "Base Overview",
         shouldRun = overviewMonitorIsReady,
+    },
+    {
+        path = "overview_relay.lua",
+        title = "Overview Relay",
+        shouldRun = overviewRelayIsReady,
     },
     {
         path = "reactor.lua",

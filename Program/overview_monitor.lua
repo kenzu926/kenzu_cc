@@ -7,6 +7,7 @@ local ME_NAME = "meBridge_0"
 local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
 local REACTOR_PROTOCOL = "kenzu_cc.overview.reactor"
 local TURBINE_PROTOCOL = "kenzu_cc.overview.turbines"
+local SNAPSHOT_PROTOCOL = "kenzu_cc.overview.snapshot"
 local REFRESH_INTERVAL = 1
 local REMOTE_TIMEOUT = 10 * 1000
 local JOULES_PER_FE = 2.5
@@ -15,7 +16,7 @@ local STARTED_AT = os.epoch("utc")
 local monitor = assert(peripheral.wrap(MONITOR_NAME), "Overview monitor not found: " .. MONITOR_NAME)
 local matrix = peripheral.wrap(MATRIX_NAME)
 local reactor = peripheral.wrap(REACTOR_NAME)
-local meBridge = peripheral.wrap(ME_NAME)
+local meBridge
 local remoteMatrix, remoteReactor, remoteTurbines
 local reactorHeartbeat, turbineHeartbeat, meHeartbeat
 local remoteME = { connected = false, cells = 0, used = 0, total = 0 }
@@ -39,6 +40,23 @@ local function openWirelessModem()
 end
 
 local hasRednet = openWirelessModem()
+
+local function findMEBridge()
+    local exact = peripheral.wrap(ME_NAME)
+    if exact then return exact end
+    for _, name in ipairs(peripheral.getNames()) do
+        local device = peripheral.wrap(name)
+        local lower = name:lower()
+        if device and (lower:find("mebridge", 1, true)
+                or device.getStorageStats
+                or device.getMaxItemStorage
+                or device.getTotalItemStorage) then
+            return device
+        end
+    end
+end
+
+meBridge = findMEBridge()
 
 local function safeRawCall(device, method)
     if not device or not device[method] then return nil end
@@ -91,8 +109,8 @@ local function matrixStats()
             output = safeNumber(matrix, "getLastOutput") / JOULES_PER_FE,
         }, "LOCAL"
     end
-    if isFresh(reactorHeartbeat) and type(remoteMatrix) == "table" then
-        return remoteMatrix, "REDNET"
+    if type(remoteMatrix) == "table" then
+        return remoteMatrix, isFresh(reactorHeartbeat) and "REDNET" or "STALE"
     end
     return {}, "OFFLINE"
 end
@@ -109,8 +127,8 @@ local function reactorStats()
             damage = safeNumber(reactor, "getDamagePercent"),
         }, "LOCAL"
     end
-    if isFresh(reactorHeartbeat) and type(remoteReactor) == "table" then
-        return remoteReactor, "REDNET"
+    if type(remoteReactor) == "table" then
+        return remoteReactor, isFresh(reactorHeartbeat) and "REDNET" or "STALE"
     end
     return {}, "OFFLINE"
 end
@@ -137,9 +155,9 @@ local function turbineStats()
     local statuses = localTurbines()
     local source = "LOCAL"
     if #statuses == 0 then
-        if isFresh(turbineHeartbeat) and type(remoteTurbines) == "table" then
+        if type(remoteTurbines) == "table" then
             statuses = remoteTurbines
-            source = "REDNET"
+            source = isFresh(turbineHeartbeat) and "REDNET" or "STALE"
         else
             source = "OFFLINE"
         end
@@ -175,7 +193,7 @@ local function meStats()
             total = total,
         }, "LOCAL"
     end
-    if isFresh(meHeartbeat) then return remoteME, "REDNET" end
+    if meHeartbeat then return remoteME, isFresh(meHeartbeat) and "REDNET" or "STALE" end
     return { connected = false, cells = 0, used = 0, total = 0 }, "OFFLINE"
 end
 
@@ -217,16 +235,20 @@ end
 
 local function sectionHeader(y, label, source, color)
     local width = monitor.getSize()
-    fill(1, y, width, y, colors.gray)
-    text(2, y, label, color, colors.gray)
-    text(math.max(2, width - #source), y, source, source == "OFFLINE" and colors.red or colors.lime, colors.gray)
+    fill(1, y, width, y, color)
+    text(2, y, label, colors.black, color)
+    local sourceColor = colors.lime
+    if source == "OFFLINE" then sourceColor = colors.red end
+    if source == "STALE" then sourceColor = colors.orange end
+    text(math.max(2, width - #source), y, source, sourceColor, color)
 end
 
-local function meter(y, label, percent, color)
+local function meter(y, label, percent, color, rows)
     local width = monitor.getSize()
+    rows = rows or 2
     text(3, y, label, colors.lightGray)
     text(math.max(3, width - 8), y, ("%6.1f%%"):format(tonumber(percent) or 0), colors.white)
-    bar(3, y + 1, math.max(8, width - 6), percent, color, 1)
+    bar(3, y + 1, math.max(8, width - 6), percent, color, rows)
 end
 
 local function moscowDateTime()
@@ -257,40 +279,40 @@ local function draw()
     monitor.setBackgroundColor(colors.black)
     monitor.clear()
 
-    fill(1, 1, width, 4, colors.gray)
-    centered(1, 'ATM9 - "Maids in stockings"(gornichnyye v chulochkakh)', colors.cyan, colors.gray)
-    text(2, 3, moscowDateTime() .. " MSK", colors.white, colors.gray)
+    fill(1, 1, width, 5, colors.gray)
+    centered(2, 'ATM9 - "Maids in stockings"(gornichnyye v chulochkakh)', colors.cyan, colors.gray)
+    text(3, 4, moscowDateTime() .. " MSK", colors.white, colors.gray)
     local up = uptime()
-    text(math.max(2, width - #up), 3, up, colors.lightGray, colors.gray)
+    text(math.max(3, width - #up - 1), 4, up, colors.lightGray, colors.gray)
 
-    sectionHeader(6, " INDUCTION MATRIX", matrixSource, colors.lightBlue)
-    text(3, 7, ("%s / %s FE"):format(shorten(stored), shorten(capacity)), colors.white)
-    meter(8, "ENERGY", energy, energy >= 95 and colors.orange or colors.lime)
-    text(3, 11, ("IN %s FE/t   OUT %s FE/t   NET %s"):format(
+    sectionHeader(7, " INDUCTION MATRIX", matrixSource, colors.lightBlue)
+    text(3, 9, ("%s / %s FE"):format(shorten(stored), shorten(capacity)), colors.white)
+    meter(10, "ENERGY", energy, energy >= 95 and colors.orange or colors.lime, 2)
+    text(3, 14, ("IN %s FE/t   OUT %s FE/t   NET %s"):format(
         shorten(input), shorten(output), shorten(input - output)), colors.lightGray)
 
-    sectionHeader(13, " FISSION REACTOR", reactorSource, colors.yellow)
+    sectionHeader(16, " FISSION REACTOR", reactorSource, colors.yellow)
     local running = reactorData.running == true
-    text(3, 14, running and "ONLINE" or "SCRAMMED", running and colors.lime or colors.red)
-    text(16, 14, ("TEMP %.0f K  BURN %.2f mB/t  DAMAGE %.1f%%"):format(
+    text(3, 18, running and "ONLINE" or "SCRAMMED", running and colors.lime or colors.red)
+    text(16, 18, ("TEMP %.0f K  BURN %.2f mB/t  DAMAGE %.1f%%"):format(
         tonumber(reactorData.temperature) or 0,
         tonumber(reactorData.actualBurnRate) or 0,
         tonumber(reactorData.damage) or 0), colors.lightGray)
-    meter(16, "WATER", reactorData.coolantPercent, colors.blue)
-    meter(19, "FUEL", reactorData.fuelPercent, colors.green)
-    meter(22, "WASTE", reactorData.wastePercent, colors.red)
+    meter(20, "WATER", reactorData.coolantPercent, colors.blue, 2)
+    meter(24, "FUEL", reactorData.fuelPercent, colors.green, 2)
+    meter(28, "WASTE", reactorData.wastePercent, colors.red, 2)
 
-    sectionHeader(25, " TURBINES", turbineSource, colors.purple)
-    text(3, 26, ("%d UNITS   GENERATION %s FE/t"):format(turbines.count, shorten(turbines.production)), colors.white)
+    sectionHeader(32, " TURBINES", turbineSource, colors.purple)
+    text(3, 34, ("%d UNITS   GENERATION %s FE/t"):format(turbines.count, shorten(turbines.production)), colors.white)
     local flowPercent = turbines.maxFlow > 0 and turbines.flow / turbines.maxFlow * 100 or 0
-    meter(27, ("FLOW %s/%s mB/t"):format(shorten(turbines.flow), shorten(turbines.maxFlow)), flowPercent, colors.purple)
-    meter(30, "STEAM BUFFER", turbines.steam, colors.lightBlue)
+    meter(35, ("FLOW %s/%s mB/t"):format(shorten(turbines.flow), shorten(turbines.maxFlow)), flowPercent, colors.purple, 2)
+    meter(39, "STEAM BUFFER", turbines.steam, colors.lightBlue, 2)
 
-    sectionHeader(33, " AE2 STORAGE", meSource, colors.cyan)
+    sectionHeader(43, " AE2 STORAGE", meSource, colors.cyan)
     local storagePercent = storage.total > 0 and storage.used / storage.total * 100 or 0
-    text(3, 34, storage.connected and ("CONNECTED   CELLS " .. storage.cells) or "DISCONNECTED",
+    text(3, 45, storage.connected and ("CONNECTED   CELLS " .. storage.cells) or "DISCONNECTED",
         storage.connected and colors.lime or colors.red)
-    meter(35, ("USED %s/%s"):format(shorten(storage.used), shorten(storage.total)), storagePercent, colors.cyan)
+    meter(46, ("USED %s/%s"):format(shorten(storage.used), shorten(storage.total)), storagePercent, colors.cyan, 2)
 
     fill(1, height, width, height, colors.gray)
     text(2, height, hasRednet and "REDNET LINK ACTIVE" or "REDNET LINK OFFLINE",
@@ -305,7 +327,7 @@ while true do
     if event == "timer" and arg1 == timer then
         matrix = peripheral.wrap(MATRIX_NAME)
         reactor = peripheral.wrap(REACTOR_NAME)
-        meBridge = peripheral.wrap(ME_NAME)
+        meBridge = findMEBridge()
         draw()
         timer = os.startTimer(REFRESH_INTERVAL)
     elseif event == "monitor_resize" and arg1 == MONITOR_NAME then
@@ -318,6 +340,21 @@ while true do
     elseif event == "rednet_message" and arg3 == TURBINE_PROTOCOL and type(arg2) == "table" then
         remoteTurbines = arg2.turbines
         turbineHeartbeat = os.epoch("utc")
+        draw()
+    elseif event == "rednet_message" and arg3 == SNAPSHOT_PROTOCOL and type(arg2) == "table" then
+        local now = os.epoch("utc")
+        if type(arg2.matrix) == "table" then
+            remoteMatrix = arg2.matrix
+            reactorHeartbeat = now
+        end
+        if type(arg2.reactor) == "table" then
+            remoteReactor = arg2.reactor
+            reactorHeartbeat = now
+        end
+        if type(arg2.turbines) == "table" then
+            remoteTurbines = arg2.turbines
+            turbineHeartbeat = now
+        end
         draw()
     elseif event == "rednet_message" and arg3 == ME_STATUS_PROTOCOL and type(arg2) == "table" then
         local metrics = type(arg2.metrics) == "table" and arg2.metrics or {}
@@ -332,7 +369,7 @@ while true do
     elseif event == "peripheral" or event == "peripheral_detach" then
         matrix = peripheral.wrap(MATRIX_NAME)
         reactor = peripheral.wrap(REACTOR_NAME)
-        meBridge = peripheral.wrap(ME_NAME)
+        meBridge = findMEBridge()
         draw()
     end
 end

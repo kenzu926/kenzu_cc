@@ -21,6 +21,7 @@ local FILES = {
     "turbine.lua",
     "remote_terminal.lua",
     "overview_monitor.lua",
+    "overview_relay.lua",
     "service_runner.lua",
 }
 
