@@ -18,10 +18,10 @@ CC:Tweaked сами устанавливают исходящее WebSocket-по
 
 ```powershell
 cd Server
-npm ci
-npm run build
+pnpm install
+pnpm build
 $env:CC_AUTH_TOKEN="replace-with-a-long-random-secret"
-npm start
+pnpm start
 ```
 
 Локально сайт доступен по адресу `http://localhost:3000`. Чтобы CC-компьютеры
@@ -55,6 +55,11 @@ reboot
 `replace-with-the-same-secret` — на тот же токен, который задан в
 `CC_AUTH_TOKEN`. Установщик сохранит параметры в `server.settings`. На сайте
 этот токен потребуется ввести при первом открытии.
+
+В новом интерфейсе откройте «Настроить подключение». Адрес шлюза по умолчанию —
+адрес самого сайта, поэтому обычно достаточно ввести тот же токен. Сайт получает
+данные через `GET /snapshot`, а команды и терминал сервер переводит в существующий
+WebSocket-протокол CC автоматически.
 
 Проверяйте внешний доступ с телефона через мобильную сеть, открыв
 `http://YOUR_PUBLIC_IP:3000/health`. Ожидаемый ответ: `{"ok":true}`.
@@ -105,3 +110,5 @@ update
 Токен защищает панель от посторонних команд. Однако обычные `http://` и `ws://`
 не шифруют трафик. Для постоянного использования через интернет рекомендуется
 добавить домен и HTTPS reverse proxy, после чего подключать CC по `wss://`.
+
+wget run https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua ws://93.170.246.220:3000/ws aAC2YrToOm3ETGGUzuKT7zAl

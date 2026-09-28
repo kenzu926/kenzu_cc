@@ -11,6 +11,7 @@ const HOST = process.env.HOST || "0.0.0.0";
 const AUTH_TOKEN = process.env.CC_AUTH_TOKEN || "";
 const OFFLINE_AFTER_MS = 20_000;
 const CONSOLE_HISTORY_LIMIT = 200;
+const HISTORY_LIMIT = 180;
 const rootDirectory = dirname(fileURLToPath(import.meta.url));
 const distDirectory = join(rootDirectory, "dist");
 
@@ -22,6 +23,15 @@ if (AUTH_TOKEN.length < 24) {
 const app = express();
 const server = createServer(app);
 const websocketServer = new WebSocketServer({ server, path: "/ws" });
+
+app.use(express.json({ limit: "64kb" }));
+app.use((request, response, next) => {
+  response.set("Access-Control-Allow-Origin", request.get("origin") || "*");
+  response.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  response.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  if (request.method === "OPTIONS") return response.sendStatus(204);
+  return next();
+});
 
 const state = {
   matrix: { online: false, lastSeen: null, computerId: null, data: null },
@@ -54,6 +64,8 @@ const roleClients = new Map([
 const GATEWAY_SERVICES = new Set(["reactor", "storage_node", "turbine", "terminal"]);
 const storageSnapshots = new WeakMap();
 const turbineUnits = new Map();
+const dashboardHistory = [];
+const pendingConsole = new Map();
 
 function tokenMatches(candidate) {
   if (typeof candidate !== "string") return false;
@@ -83,6 +95,125 @@ function publicState() {
     consoleHistory: state.consoleHistory,
     lastCommand: state.lastCommand,
   };
+}
+
+function requestToken(request) {
+  const authorization = request.get("authorization") || "";
+  return authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+}
+
+function requireToken(request, response) {
+  if (tokenMatches(requestToken(request))) return true;
+  response.status(401).json({ error: "Unauthorized" });
+  return false;
+}
+
+function numeric(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function dashboardSnapshot() {
+  const reactor = state.reactor.data || {};
+  const matrix = state.matrix.data || {};
+  const onlineTurbines = state.turbines.filter((entry) => entry.online && entry.data);
+  const turbineSum = (field) => onlineTurbines.reduce(
+    (total, entry) => total + numeric(entry.data?.[field]),
+    0,
+  );
+  const storageMetrics = state.storage.metrics || {};
+  const cells = Array.isArray(storageMetrics.cells) ? storageMetrics.cells : [];
+  const safety = reactor.safety || {};
+
+  return {
+    online: {
+      reactor: state.reactor.online,
+      matrix: state.matrix.online,
+      turbines: onlineTurbines.length,
+      storage: state.storage.online && state.storage.connected,
+    },
+    reactor: {
+      active: Boolean(reactor.running),
+      water: numeric(reactor.coolantPercent),
+      fuel: numeric(reactor.fuelPercent),
+      heated: numeric(reactor.heatedCoolantPercent),
+      waste: numeric(reactor.wastePercent),
+      heating: numeric(reactor.heatingRate),
+      temperature: numeric(reactor.temperature),
+      damage: numeric(reactor.damage),
+      burnRate: numeric(reactor.burnRate),
+      actualBurnRate: numeric(reactor.actualBurnRate),
+      maxBurnRate: Math.max(0.1, numeric(reactor.maxBurnRate, 100)),
+    },
+    matrix: {
+      energy: numeric(matrix.storedEnergy) / 1e12,
+      capacity: Math.max(0.000001, numeric(matrix.capacity, 1) / 1e12),
+      input: numeric(matrix.input),
+      output: numeric(matrix.output),
+    },
+    turbines: {
+      generation: turbineSum("production") / 1e6,
+      flow: turbineSum("flowRate"),
+      maxFlow: turbineSum("maxFlowRate"),
+      steam: turbineSum("steam"),
+      steamCapacity: Math.max(1, turbineSum("steamCapacity")),
+      count: onlineTurbines.length,
+      units: onlineTurbines.map((entry, index) => ({
+        name: String(entry.data?.peripheral || `Турбина ${index + 1}`),
+        generation: numeric(entry.data?.production) / 1e6,
+        flow: numeric(entry.data?.flowRate),
+        maxFlow: numeric(entry.data?.maxFlowRate),
+        steam: numeric(entry.data?.steam),
+        steamCapacity: Math.max(1, numeric(entry.data?.steamCapacity, 1)),
+      })),
+    },
+    storage: {
+      used: numeric(storageMetrics.used),
+      capacity: Math.max(1, numeric(storageMetrics.total, 1)),
+      cells: cells.map((cell, index) => ({
+        name: String(cell.item || cell.name || `Ячейка ${index + 1}`),
+        used: numeric(cell.usedBytes ?? cell.used),
+        capacity: Math.max(1, numeric(cell.totalBytes ?? cell.capacity, 1)),
+        usedKnown: cell.usedKnown === true
+          || cell.usedBytes !== undefined
+          || cell.used !== undefined,
+      })),
+      items: state.storage.items.map((item) => ({
+        name: String(item.displayName || item.name || "unknown"),
+        id: String(item.name || item.fingerprint || "unknown"),
+        count: numeric(item.count ?? item.amount),
+      })),
+    },
+    safety: {
+      energy: {
+        enabled: safety.energyEnabled !== false,
+        threshold: numeric(safety.energyStopPercent, reactor.stopPercent || 98),
+      },
+      steam: {
+        enabled: safety.steamEnabled !== false,
+        threshold: numeric(safety.steamStopPercent, 90),
+      },
+      water: {
+        enabled: safety.waterEnabled !== false,
+        threshold: numeric(safety.waterStopPercent, 10),
+      },
+      fuel: {
+        enabled: safety.fuelEnabled === true,
+        threshold: numeric(safety.fuelStopPercent, 5),
+      },
+    },
+    terminals: state.terminals,
+    history: dashboardHistory,
+  };
+}
+
+function dispatchReactorCommand(command) {
+  const error = validateCommand(command);
+  if (error) return { ok: false, status: 400, error };
+  if (sendToRole("reactor", { type: "command", requestId: `${Date.now()}`, ...command }) === 0) {
+    return { ok: false, status: 503, error: "Reactor computer is offline" };
+  }
+  return { ok: true, status: 202 };
 }
 
 function computerKey(role, computerId) {
@@ -525,6 +656,11 @@ websocketServer.on("connection", (socket) => {
         output: String(message.output || ""),
         at: Date.now(),
       };
+      const pending = pendingConsole.get(String(output.requestId));
+      if (pending) {
+        pendingConsole.delete(String(output.requestId));
+        pending(output);
+      }
       state.consoleHistory.push(output);
       if (state.consoleHistory.length > CONSOLE_HISTORY_LIMIT) state.consoleHistory.shift();
       broadcastToBrowsers(output);
@@ -597,6 +733,17 @@ setInterval(() => {
     if (unit.online && now - unit.lastSeen > OFFLINE_AFTER_MS) unit.online = false;
   }
   state.turbines = [...turbineUnits.values()];
+  const sample = dashboardSnapshot();
+  dashboardHistory.push({
+    time: new Date().toLocaleTimeString("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }),
+    temperature: sample.reactor.temperature,
+    generation: sample.turbines.generation,
+  });
+  if (dashboardHistory.length > HISTORY_LIMIT) dashboardHistory.shift();
   broadcastToBrowsers({
     type: "system_status",
     matrix: state.matrix,
@@ -617,10 +764,98 @@ setInterval(() => {
 }, 2_000);
 
 app.get("/api/state", (request, response) => {
-  const authorization = request.get("authorization") || "";
-  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
-  if (!tokenMatches(token)) return response.status(401).json({ error: "Unauthorized" });
+  if (!requireToken(request, response)) return;
   return response.json(publicState());
+});
+app.get("/snapshot", (request, response) => {
+  if (!requireToken(request, response)) return;
+  return response.json(dashboardSnapshot());
+});
+app.post("/command", (request, response) => {
+  if (!requireToken(request, response)) return;
+  const type = String(request.body?.type || "");
+  const value = request.body?.value;
+  let result;
+
+  if (type === "reactor.activate") {
+    result = dispatchReactorCommand({ action: "reactor_start" });
+  } else if (type === "reactor.scram") {
+    result = dispatchReactorCommand({ action: "reactor_scram" });
+  } else if (type === "reactor.setBurnRate") {
+    result = dispatchReactorCommand({ action: "set_burn_rate", burnRate: Number(value) });
+  } else if (type === "safety.set" && value && typeof value === "object") {
+    const snapshot = dashboardSnapshot();
+    const key = String(value.key || "");
+    if (!Object.hasOwn(snapshot.safety, key)) {
+      return response.status(400).json({ error: "Unknown safety channel" });
+    }
+    snapshot.safety[key] = {
+      enabled: value.enabled === true,
+      threshold: Math.max(0, Math.min(100, Number(value.threshold))),
+    };
+    const safetyResult = dispatchReactorCommand({
+      action: "set_safety",
+      energyEnabled: snapshot.safety.energy.enabled,
+      steamEnabled: snapshot.safety.steam.enabled,
+      waterEnabled: snapshot.safety.water.enabled,
+      fuelEnabled: snapshot.safety.fuel.enabled,
+      steamStopPercent: snapshot.safety.steam.threshold,
+      waterStopPercent: snapshot.safety.water.threshold,
+      fuelStopPercent: snapshot.safety.fuel.threshold,
+    });
+    if (!safetyResult.ok) result = safetyResult;
+    else if (key === "energy") {
+      const configuredStart = numeric(state.reactor.data?.safety?.energyStartPercent, 80);
+      const stopPercent = Math.max(1, Math.round(snapshot.safety.energy.threshold));
+      result = dispatchReactorCommand({
+        action: "set_thresholds",
+        startPercent: Math.min(stopPercent - 1, Math.round(configuredStart)),
+        stopPercent,
+      });
+    } else result = safetyResult;
+  } else {
+    result = { ok: false, status: 400, error: "Unknown command" };
+  }
+
+  return response.status(result.status).json(
+    result.ok ? { ok: true } : { ok: false, error: result.error },
+  );
+});
+app.post("/terminal", async (request, response) => {
+  if (!requireToken(request, response)) return;
+  const input = String(request.body?.input || "").trim();
+  if (!input || input.length > 256) {
+    return response.status(400).json({ error: "Invalid command" });
+  }
+  const target = String(request.body?.target || "reactor");
+  if (target !== "reactor" && target !== "storage_node") {
+    return response.status(400).json({ error: "Invalid terminal target" });
+  }
+  const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const payload = {
+    type: "console_command",
+    requestId,
+    target,
+    command: input,
+  };
+  let recipients = sendToRole(target, payload);
+  if (recipients === 0 && target === "storage_node") {
+    recipients = sendToRole("reactor", payload);
+  }
+  if (recipients === 0) {
+    return response.status(503).json({ output: `${target} computer is offline` });
+  }
+  const output = await new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingConsole.delete(requestId);
+      resolve({ output: "Команда отправлена, ответ не получен" });
+    }, 3_000);
+    pendingConsole.set(requestId, (message) => {
+      clearTimeout(timeout);
+      resolve(message);
+    });
+  });
+  return response.json(output);
 });
 app.get("/health", (_request, response) => response.json({ ok: true }));
 

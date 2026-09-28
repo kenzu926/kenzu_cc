@@ -53,8 +53,9 @@ local function getMEStatus()
             device
     end
 
-    if isBridge and device.getTotalItemStorage then
-        local ok, storage = pcall(device.getTotalItemStorage)
+    local storageMethod = isBridge and (device.getMaxItemStorage or device.getTotalItemStorage)
+    if storageMethod then
+        local ok, storage = pcall(storageMethod)
         if ok and storage ~= nil then
             return true, "Connected via ME Bridge", device
         end
@@ -82,28 +83,65 @@ local function safeCall(device, methodName, fallback)
     return ok and value ~= nil and value or fallback
 end
 
+local function firstNumber(source, names)
+    for _, name in ipairs(names) do
+        local value = tonumber(source and source[name])
+        if value ~= nil then return value end
+    end
+    return nil
+end
+
+local function cellName(cell, index)
+    local item = cell and (cell.item or cell.name)
+    if type(item) == "table" then
+        item = item.displayName or item.name or item.id
+    end
+    return tostring(item or ("ME storage cell " .. index))
+end
+
 local function refreshStorageMetrics()
     if not meConnected or not meDevice then
         storageMetrics = { total = 0, used = 0, available = 0, cells = {} }
         return
     end
     local cells = {}
-    local rawCells = safeCall(meDevice, "listCells", {})
+    local rawCells = safeCall(meDevice, "getCells", nil)
+    if type(rawCells) ~= "table" then
+        rawCells = safeCall(meDevice, "listCells", {})
+    end
     if type(rawCells) == "table" then
-        for _, cell in pairs(rawCells) do
+        for index, cell in pairs(rawCells) do
+            local totalBytes = firstNumber(cell, {
+                "totalBytes", "capacity", "maxBytes", "bytesTotal",
+            }) or 0
+            local usedBytes = firstNumber(cell, {
+                "usedBytes", "used", "bytesUsed",
+            })
+            local availableBytes = firstNumber(cell, {
+                "availableBytes", "freeBytes", "bytesFree",
+            })
+            if usedBytes == nil and availableBytes ~= nil and totalBytes > 0 then
+                usedBytes = math.max(0, totalBytes - availableBytes)
+            end
             cells[#cells + 1] = {
-                item = cell.item or cell.name or "unknown",
+                item = cellName(cell, index),
                 cellType = cell.cellType or "item",
-                totalBytes = tonumber(cell.totalBytes) or 0,
-                usedBytes = tonumber(cell.usedBytes or cell.used) or nil,
+                totalBytes = totalBytes,
+                usedBytes = usedBytes,
+                usedKnown = usedBytes ~= nil,
                 bytesPerType = tonumber(cell.bytesPerType) or 0,
             }
         end
     end
+    local total = tonumber(safeCall(meDevice, "getMaxItemStorage", nil))
+        or tonumber(safeCall(meDevice, "getTotalItemStorage", 0)) or 0
+    local used = tonumber(safeCall(meDevice, "getUsedItemStorage", 0)) or 0
+    local available = tonumber(safeCall(meDevice, "getAvailableItemStorage", nil))
+        or math.max(0, total - used)
     storageMetrics = {
-        total = tonumber(safeCall(meDevice, "getTotalItemStorage", 0)) or 0,
-        used = tonumber(safeCall(meDevice, "getUsedItemStorage", 0)) or 0,
-        available = tonumber(safeCall(meDevice, "getAvailableItemStorage", 0)) or 0,
+        total = total,
+        used = used,
+        available = available,
         cells = cells,
     }
 end
