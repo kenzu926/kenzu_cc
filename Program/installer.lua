@@ -13,6 +13,8 @@ local FILES = {
     "update.lua",
     "update_agent.lua",
     "ws_client.lua",
+    "gateway_client.lua",
+    "gateway.lua",
     "console.lua",
     "reactor.lua",
     "me_node.lua",

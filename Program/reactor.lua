@@ -11,7 +11,7 @@ local TERMINAL_INPUT_PROTOCOL = "kenzu_cc.terminal.input"
 local REMOTE_TIMEOUT = 20 * 1000
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
-local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
+local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local server = WebSocketClient.new("reactor")
 

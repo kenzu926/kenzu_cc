@@ -44,11 +44,13 @@ const state = {
 
 const clients = new Set();
 const roleClients = new Map([
+  ["gateway", new Set()],
   ["reactor", new Set()],
   ["storage_node", new Set()],
   ["turbine", new Set()],
   ["terminal", new Set()],
 ]);
+const GATEWAY_SERVICES = new Set(["reactor", "storage_node", "turbine", "terminal"]);
 const storageSnapshots = new WeakMap();
 const turbineUnits = new Map();
 
@@ -86,11 +88,11 @@ function computerKey(role, computerId) {
   return `${role}:${computerId ?? "unknown"}`;
 }
 
-function touchComputer(socket) {
-  if (!socket.role || socket.role === "browser" || socket.role === "unknown") return;
-  const key = computerKey(socket.role, socket.computerId);
+function touchComputer(socket, role = socket.role) {
+  if (!role || role === "browser" || role === "unknown" || role === "gateway") return;
+  const key = computerKey(role, socket.computerId);
   state.computers[key] = {
-    role: socket.role,
+    role,
     computerId: socket.computerId,
     label: socket.label || null,
     online: true,
@@ -98,16 +100,16 @@ function touchComputer(socket) {
   };
 }
 
-function touchRoleState(socket) {
+function touchRoleState(socket, role = socket.role) {
   const now = Date.now();
-  if (socket.role === "reactor") {
+  if (role === "reactor") {
     state.matrix.online = true;
     state.matrix.lastSeen = now;
     state.matrix.computerId = socket.computerId;
     state.reactor.online = true;
     state.reactor.lastSeen = now;
     state.reactor.computerId = socket.computerId;
-  } else if (socket.role === "storage_node") {
+  } else if (role === "storage_node") {
     state.storage.online = true;
     state.storage.lastSeen = now;
     state.storage.computerId = socket.computerId;
@@ -149,6 +151,12 @@ function sendToRole(role, payload) {
       recipients += 1;
     }
   }
+  for (const socket of roleClients.get("gateway") || []) {
+    if (socket.readyState === WebSocket.OPEN && socket.services?.has(role)) {
+      send(socket, { ...payload, targetService: role });
+      recipients += 1;
+    }
+  }
   return recipients;
 }
 
@@ -180,6 +188,12 @@ function routeTerminalInput(browser, message) {
       recipients += 1;
     }
   }
+  for (const gateway of roleClients.get("gateway") || []) {
+    if (String(gateway.computerId) === target && gateway.services?.has("terminal")) {
+      send(gateway, { ...payload, targetService: "terminal" });
+      recipients += 1;
+    }
+  }
   if (recipients === 0) recipients = sendToRole("reactor", { ...payload, target });
   if (recipients === 0) send(browser, { type: "terminal_error", message: "Terminal is offline" });
 }
@@ -208,7 +222,9 @@ function routeConsoleCommand(browser, message) {
   } else {
     for (const socket of clients) {
       if (socket.role !== "browser" && String(socket.computerId) === target) {
-        send(socket, payload);
+        send(socket, socket.role === "gateway"
+          ? { ...payload, targetService: "*" }
+          : payload);
         recipients += 1;
       }
     }
@@ -229,6 +245,7 @@ function routeConsoleCommand(browser, message) {
 websocketServer.on("connection", (socket) => {
   socket.role = "unknown";
   socket.authenticated = false;
+  socket.services = new Set();
   clients.add(socket);
 
   socket.on("message", (rawMessage) => {
@@ -266,15 +283,42 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    touchComputer(socket);
-    touchRoleState(socket);
-
     if (message.type === "ping") {
       send(socket, { type: "pong", sentAt: message.sentAt ?? null, serverAt: Date.now() });
       return;
     }
 
-    if (message.type === "matrix_status" && socket.role === "reactor") {
+    if (message.type === "service_announce" && socket.role === "gateway") {
+      const nextServices = new Set(
+        (Array.isArray(message.services) ? message.services : [])
+          .map(String)
+          .filter((service) => GATEWAY_SERVICES.has(service)),
+      );
+      for (const oldService of socket.services) {
+        if (!nextServices.has(oldService)) {
+          const oldComputer = state.computers[computerKey(oldService, socket.computerId)];
+          if (oldComputer) oldComputer.online = false;
+        }
+      }
+      socket.services = nextServices;
+      for (const service of socket.services) touchComputer(socket, service);
+      broadcastComputers();
+      return;
+    }
+
+    const effectiveRole = socket.role === "gateway" ? String(message.service || "") : socket.role;
+    if (socket.role === "gateway" && !GATEWAY_SERVICES.has(effectiveRole)) {
+      send(socket, { type: "error", message: "Invalid or missing gateway service" });
+      return;
+    }
+    if (socket.role === "gateway" && !socket.services.has(effectiveRole)) {
+      socket.services.add(effectiveRole);
+      broadcastComputers();
+    }
+    touchComputer(socket, effectiveRole);
+    touchRoleState(socket, effectiveRole);
+
+    if (message.type === "matrix_status" && effectiveRole === "reactor") {
       state.matrix = {
         online: true,
         lastSeen: Date.now(),
@@ -285,7 +329,7 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "reactor_status" && socket.role === "reactor") {
+    if (message.type === "reactor_status" && effectiveRole === "reactor") {
       state.reactor = {
         online: true,
         lastSeen: Date.now(),
@@ -296,7 +340,7 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "terminal_frame" && (socket.role === "terminal" || socket.role === "reactor")) {
+    if (message.type === "terminal_frame" && (effectiveRole === "terminal" || effectiveRole === "reactor")) {
       const sourceComputerId = message.computerId ?? socket.computerId;
       const key = String(sourceComputerId ?? "unknown");
       const lines = Array.isArray(message.lines) ? message.lines.slice(0, 80).map((line) => ({
@@ -321,8 +365,9 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "turbines_status" && socket.role === "turbine") {
-      const prefix = `${computerKey(socket.role, socket.computerId)}:`;
+    const isTurbineSource = effectiveRole === "turbine" || effectiveRole === "terminal";
+    if (message.type === "turbines_status" && isTurbineSource) {
+      const prefix = `turbine:${socket.computerId}:`;
       for (const key of turbineUnits.keys()) {
         if (key.startsWith(prefix)) turbineUnits.delete(key);
       }
@@ -335,6 +380,7 @@ websocketServer.on("connection", (socket) => {
           online: true,
           lastSeen: Date.now(),
           computerId: socket.computerId,
+          sourceRole: effectiveRole,
           data: { ...data, peripheral },
         });
       });
@@ -344,13 +390,14 @@ websocketServer.on("connection", (socket) => {
     }
 
     // Compatibility with computers which have not received the new updater yet.
-    if (message.type === "turbine_status" && socket.role === "turbine") {
+    if (message.type === "turbine_status" && effectiveRole === "turbine") {
       const peripheral = String(message.data?.peripheral || "turbine").slice(0, 100);
       const key = `${computerKey(socket.role, socket.computerId)}:${peripheral}`;
       turbineUnits.set(key, {
         online: true,
         lastSeen: Date.now(),
         computerId: socket.computerId,
+        sourceRole: effectiveRole,
         data: { ...message.data, peripheral },
       });
       state.turbines = [...turbineUnits.values()];
@@ -358,7 +405,7 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    const isStorageSource = socket.role === "storage_node" || socket.role === "reactor";
+    const isStorageSource = effectiveRole === "storage_node" || effectiveRole === "reactor";
     if (message.type === "storage_status" && isStorageSource) {
       state.storage.online = true;
       state.storage.lastSeen = Date.now();
@@ -424,7 +471,7 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "command_result" && socket.role === "reactor") {
+    if (message.type === "command_result" && effectiveRole === "reactor") {
       state.lastCommand = {
         ok: message.ok === true,
         message: message.message || "",
@@ -445,11 +492,11 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
-    if (message.type === "console_output" && socket.role !== "browser") {
+    if (message.type === "console_output" && effectiveRole !== "browser") {
       const output = {
         type: "console_output",
         requestId: message.requestId || null,
-        target: message.target || socket.role,
+        target: message.target || effectiveRole,
         computerId: message.computerId ?? socket.computerId,
         ok: message.ok === true,
         output: String(message.output || ""),
@@ -467,25 +514,45 @@ websocketServer.on("connection", (socket) => {
     storageSnapshots.delete(socket);
 
     if (socket.role !== "browser" && socket.role !== "unknown") {
-      const key = computerKey(socket.role, socket.computerId);
-      const replacement = [...(roleClients.get(socket.role) || [])]
-        .some((candidate) => candidate.computerId === socket.computerId);
-      if (!replacement && state.computers[key]) state.computers[key].online = false;
-      if (!replacement && socket.role === "reactor") {
-        state.matrix.online = false;
-        state.reactor.online = false;
-      }
-      if (!replacement && socket.role === "storage_node") state.storage.online = false;
-      if (!replacement && socket.role === "turbine") {
-        for (const unit of turbineUnits.values()) {
-          if (unit.computerId === socket.computerId) unit.online = false;
+      const services = socket.role === "gateway" ? [...socket.services] : [socket.role];
+      let turbinesChanged = false;
+
+      for (const service of services) {
+        const directReplacement = [...(roleClients.get(service) || [])]
+          .some((candidate) => candidate.computerId === socket.computerId);
+        const gatewayReplacement = [...(roleClients.get("gateway") || [])]
+          .some((candidate) => candidate.computerId === socket.computerId
+            && candidate.services?.has(service));
+        const replacement = directReplacement || gatewayReplacement;
+        if (replacement) continue;
+
+        const key = computerKey(service, socket.computerId);
+        if (state.computers[key]) state.computers[key].online = false;
+        if (service === "reactor") {
+          state.matrix.online = false;
+          state.reactor.online = false;
         }
+        if (service === "storage_node") state.storage.online = false;
+        if (service === "turbine" || service === "terminal") {
+          for (const unit of turbineUnits.values()) {
+            if (unit.computerId === socket.computerId && unit.sourceRole === service) {
+              unit.online = false;
+              turbinesChanged = true;
+            }
+          }
+        }
+        if (service === "terminal" && state.terminals[String(socket.computerId)]) {
+          state.terminals[String(socket.computerId)].online = false;
+          broadcastToBrowsers({
+            type: "terminal_frame",
+            terminal: state.terminals[String(socket.computerId)],
+          });
+        }
+      }
+
+      if (turbinesChanged) {
         state.turbines = [...turbineUnits.values()];
         broadcastToBrowsers({ type: "turbines_state", turbines: state.turbines });
-      }
-      if (socket.role === "terminal" && !replacement && state.terminals[String(socket.computerId)]) {
-        state.terminals[String(socket.computerId)].online = false;
-        broadcastToBrowsers({ type: "terminal_frame", terminal: state.terminals[String(socket.computerId)] });
       }
       broadcastComputers();
     }

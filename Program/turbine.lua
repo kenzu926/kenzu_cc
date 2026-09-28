@@ -2,9 +2,9 @@
 local CHECK_INTERVAL = 2
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
-local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
+local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
-local server = WebSocketClient.new("turbine")
+local server = GatewayClient.new("turbine")
 
 local function hasPeripheralType(name, peripheralType)
     if not peripheral.hasType then return false end
@@ -84,7 +84,7 @@ local function sendStatus()
     term.setCursorPos(1, 1)
     print("Turbine telemetry")
     print(statusText(statuses))
-    print("Web: " .. (server:isConnected() and "CONNECTED" or "OFFLINE"))
+    print("Gateway: " .. (server:isConnected() and "CONNECTED" or "OFFLINE"))
 end
 
 server:connect()

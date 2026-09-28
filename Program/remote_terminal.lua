@@ -1,7 +1,7 @@
 -- Interactive CraftOS terminal mirrored to the Kenzu Control website.
 -- This runs in its own multishell tab, so reactor automation remains isolated.
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
-local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
+local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local server = WebSocketClient.new("terminal")
 local TERMINAL_FRAME_PROTOCOL = "kenzu_cc.terminal.frame"
 local TERMINAL_INPUT_PROTOCOL = "kenzu_cc.terminal.input"
@@ -173,6 +173,8 @@ while true do
         and type(event[3]) == "table"
         and tostring(event[3].target) == tostring(os.getComputerID()) then
         handleRemoteInput(event[3])
+    elseif type(event[1]) == "string" and event[1]:find("^kenzu_gateway_") then
+        -- Gateway IPC events belong to project services, not the nested shell.
     elseif event[1] ~= "websocket_success"
         and event[1] ~= "websocket_failure"
         and event[1] ~= "websocket_message"

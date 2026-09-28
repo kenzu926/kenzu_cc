@@ -23,6 +23,11 @@ end
 
 local PROGRAMS = {
     {
+        path = "gateway.lua",
+        title = "Gateway",
+        shouldRun = function() return true end,
+    },
+    {
         path = "update_agent.lua",
         title = "Update Agent",
         shouldRun = function() return true end,
@@ -91,7 +96,7 @@ for _, program in ipairs(PROGRAMS) do
         printErrorMessage("Program is a directory: " .. program.path)
     else
         local tabId
-        if program.path == "remote_terminal.lua" or not fs.exists(runnerPath) then
+        if not fs.exists(runnerPath) then
             tabId = shell.openTab(path)
         else
             tabId = shell.openTab(runnerPath, path, program.title)

@@ -9,7 +9,7 @@ local STORAGE_INTERVAL = 5
 local STORAGE_CHUNK_SIZE = 100
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
-local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
+local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local server = WebSocketClient.new("storage_node")
 
