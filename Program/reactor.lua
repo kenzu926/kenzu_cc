@@ -17,6 +17,9 @@ local server = WebSocketClient.new("reactor")
 
 local SETTINGS_FILE = "reactor.settings"
 local CHECK_INTERVAL = 1
+-- Mekanism's ComputerCraft API reports energy in Joules even when the game UI
+-- is configured to display Forge Energy. Default conversion: 1 FE = 2.5 J.
+local JOULES_PER_FE = 2.5
 
 settings.define("reactor.startPercent", {
     description = "Start reactor at or below this energy percentage",
@@ -241,10 +244,10 @@ local function safeAmount(method)
 end
 
 local function sendReactorStatus()
-    local storedEnergy = safeNumber(matrix.getEnergy)
-    local capacity = safeNumber(matrix.getMaxEnergy)
-    local input = safeNumber(matrix.getLastInput)
-    local output = safeNumber(matrix.getLastOutput)
+    local storedEnergy = safeNumber(matrix.getEnergy) / JOULES_PER_FE
+    local capacity = safeNumber(matrix.getMaxEnergy) / JOULES_PER_FE
+    local input = safeNumber(matrix.getLastInput) / JOULES_PER_FE
+    local output = safeNumber(matrix.getLastOutput) / JOULES_PER_FE
 
     server:send({
         type = "matrix_status",
@@ -256,7 +259,9 @@ local function sendReactorStatus()
             input = input,
             output = output,
             net = input - output,
-            energyNeeded = safeNumber(matrix.getEnergyNeeded),
+            energyNeeded = safeNumber(matrix.getEnergyNeeded) / JOULES_PER_FE,
+            energyUnit = "FE",
+            joulesPerFE = JOULES_PER_FE,
         },
     })
 

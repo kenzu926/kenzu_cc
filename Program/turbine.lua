@@ -1,5 +1,6 @@
 -- Mekanism turbine telemetry service with automatic multi-turbine discovery.
 local CHECK_INTERVAL = 2
+local JOULES_PER_FE = 2.5
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
@@ -44,7 +45,7 @@ local function readTurbine(entry)
     local turbine = entry.device
     return {
         peripheral = entry.name,
-        production = safeNumber(turbine, "getProductionRate"),
+        production = safeNumber(turbine, "getProductionRate") / JOULES_PER_FE,
         flowRate = safeNumber(turbine, "getFlowRate"),
         maxFlowRate = safeNumber(turbine, "getMaxFlowRate"),
         steamPercent = safeNumber(turbine, "getSteamFilledPercentage") * 100,
