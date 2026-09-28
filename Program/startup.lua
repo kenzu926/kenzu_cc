@@ -14,6 +14,13 @@ local function meNodeIsReady()
     return false
 end
 
+local function turbineIsReady()
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:lower():find("turbine", 1, true) then return true end
+    end
+    return false
+end
+
 local PROGRAMS = {
     {
         path = "update_agent.lua",
@@ -38,8 +45,7 @@ local PROGRAMS = {
     {
         path = "turbine.lua",
         title = "Turbine",
-        -- Always keep discovery alive so turbines added after boot appear too.
-        shouldRun = function() return true end,
+        shouldRun = turbineIsReady,
     },
 }
 
@@ -56,6 +62,12 @@ local function printErrorMessage(message)
     term.setTextColor(colors.white)
 end
 
+local function findRunningTab(title)
+    for tabId = 1, multishell.getCount() do
+        if multishell.getTitle(tabId) == title then return tabId end
+    end
+end
+
 if not multishell or not shell.openTab then
     printErrorMessage(
         "This project requires multishell (use an Advanced Computer)."
@@ -67,8 +79,11 @@ local launched = 0
 
 for _, program in ipairs(PROGRAMS) do
     local path = projectPath(program.path)
+    local existingTab = findRunningTab(program.title)
 
-    if not program.shouldRun() then
+    if existingTab then
+        print(("Already running %s (tab %d)"):format(program.title, existingTab))
+    elseif not program.shouldRun() then
         print("Skipped " .. program.title .. " (peripherals not found)")
     elseif not fs.exists(path) then
         printErrorMessage("Missing program: " .. program.path)

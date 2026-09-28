@@ -1,7 +1,9 @@
 -- Shared asynchronous WebSocket client for CC:Tweaked services.
 local Client = {}
 Client.__index = Client
-local CONNECT_TIMEOUT_MS = 15 * 1000
+-- The native request already has its own timeout. This larger guard prevents
+-- opening replacement sockets while CC:Tweaked is still cleaning up a request.
+local CONNECT_TIMEOUT_MS = 45 * 1000
 local KEEPALIVE_INTERVAL_MS = 5 * 1000
 local STALE_CONNECTION_MS = 20 * 1000
 
@@ -77,12 +79,24 @@ function Client:connect()
     end
 
     self.lastAttempt = now
-    local started, requestError = http.websocketAsync({
+    local requestOk, started, requestError = pcall(http.websocketAsync, {
         url = self.url,
         timeout = 10,
     })
+    if not requestOk then
+        -- nativeWebsocket throws when the configured connection limit is full.
+        -- Keep the local service alive and retry later instead of crashing it.
+        self.lastError = tostring(started)
+        self.connecting = false
+        if self.lastError:find("Too many websockets", 1, true) then
+            -- Give abandoned native requests time to expire and release slots.
+            self.lastAttempt = now + 25 * 1000
+        end
+        return false
+    end
     if not started then
         self.lastError = requestError or "WebSocket request rejected"
+        self.connecting = false
         return false
     end
 
