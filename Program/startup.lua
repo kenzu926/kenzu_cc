@@ -3,7 +3,6 @@
 local function reactorIsReady()
     return peripheral.find("inductionPort") ~= nil
         and peripheral.find("fissionReactorLogicAdapter") ~= nil
-        and peripheral.find("monitor") ~= nil
 end
 
 local function meNodeIsReady()

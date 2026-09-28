@@ -72,12 +72,10 @@ local reactor = assert(
     "Fission Reactor not found: " .. REACTOR_NAME
 )
 
-local monitor = assert(
-    peripheral.wrap(MONITOR_NAME),
-    "Monitor not found: " .. MONITOR_NAME
-)
-
-monitor.setTextScale(0.5)
+-- monitor_0 is only a local control panel. Reactor safety, telemetry and web
+-- control must continue to work when that monitor is removed.
+local monitor = peripheral.wrap(MONITOR_NAME)
+if monitor then monitor.setTextScale(0.5) end
 
 local function findWirelessModem()
     for _, name in ipairs(peripheral.getNames()) do
@@ -95,7 +93,8 @@ if wirelessModemName then
     rednet.open(wirelessModemName)
 end
 
-local width, height = monitor.getSize()
+local width, height = 51, 19
+if monitor then width, height = monitor.getSize() end
 local energy = 0
 local reactorRunning = false
 local stoppedForSafety = false
@@ -170,6 +169,7 @@ local function isRemoteOnline()
 end
 
 local function drawScreen()
+    if not monitor then return end
     width, height = monitor.getSize()
     buttons = {}
 
