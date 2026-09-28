@@ -6,6 +6,8 @@ local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
 local ME_STORAGE_PROTOCOL = "kenzu_cc.me_storage"
 local CONSOLE_REQUEST_PROTOCOL = "kenzu_cc.console.request"
 local CONSOLE_RESPONSE_PROTOCOL = "kenzu_cc.console.response"
+local TERMINAL_FRAME_PROTOCOL = "kenzu_cc.terminal.frame"
+local TERMINAL_INPUT_PROTOCOL = "kenzu_cc.terminal.input"
 local REMOTE_NODE_NAME = "computer_1"
 local REMOTE_TIMEOUT = 7 * 1000
 
@@ -229,6 +231,16 @@ local function safeNumber(method, fallback)
     return tonumber(value) or fallback or 0
 end
 
+local function safeAmount(method)
+    if not method then return 0 end
+    local ok, value = pcall(method)
+    if not ok then return 0 end
+    if type(value) == "table" then
+        return tonumber(value.amount or value[1]) or 0
+    end
+    return tonumber(value) or 0
+end
+
 local function sendReactorStatus()
     local storedEnergy = safeNumber(matrix.getEnergy)
     local capacity = safeNumber(matrix.getMaxEnergy)
@@ -259,12 +271,20 @@ local function sendReactorStatus()
             temperature = safeNumber(reactor.getTemperature),
             damage = safeNumber(reactor.getDamagePercent),
             coolantPercent = safeNumber(reactor.getCoolantFilledPercentage) * 100,
+            coolant = safeAmount(reactor.getCoolant),
+            coolantCapacity = safeNumber(reactor.getCoolantCapacity),
             wastePercent = safeNumber(reactor.getWasteFilledPercentage) * 100,
+            waste = safeAmount(reactor.getWaste),
+            wasteCapacity = safeNumber(reactor.getWasteCapacity),
             burnRate = safeNumber(reactor.getBurnRate),
             actualBurnRate = safeNumber(reactor.getActualBurnRate),
             maxBurnRate = safeNumber(reactor.getMaxBurnRate),
             fuelPercent = safeNumber(reactor.getFuelFilledPercentage) * 100,
+            fuel = safeAmount(reactor.getFuel),
+            fuelCapacity = safeNumber(reactor.getFuelCapacity),
             heatedCoolantPercent = safeNumber(reactor.getHeatedCoolantFilledPercentage) * 100,
+            heatedCoolant = safeAmount(reactor.getHeatedCoolant),
+            heatedCoolantCapacity = safeNumber(reactor.getHeatedCoolantCapacity),
             heatingRate = safeNumber(reactor.getHeatingRate),
             environmentalLoss = safeNumber(reactor.getEnvironmentalLoss),
             boilEfficiency = safeNumber(reactor.getBoilEfficiency) * 100,
@@ -376,6 +396,24 @@ local function handleServerCommand(command)
         return
     end
 
+    if command.action == "set_burn_rate" then
+        local burnRate = tonumber(command.burnRate)
+        local maxBurnRate = safeNumber(reactor.getMaxBurnRate)
+        if not burnRate or burnRate < 0 or burnRate > maxBurnRate then
+            sendCommandResult(command, false, "Burn rate must be between 0 and " .. tostring(maxBurnRate))
+            return
+        end
+
+        local ok, commandError = pcall(reactor.setBurnRate, burnRate)
+        if ok then
+            message = ("Burn rate set to %.2f mB/t"):format(burnRate)
+            sendCommandResult(command, true, message)
+        else
+            sendCommandResult(command, false, tostring(commandError))
+        end
+        return
+    end
+
     sendCommandResult(command, false, "Unknown reactor command")
 end
 
@@ -459,6 +497,8 @@ while true do
             and serverMessage.target == "storage_node"
             and wirelessModemName then
             rednet.broadcast(serverMessage, CONSOLE_REQUEST_PROTOCOL)
+        elseif serverMessage.type == "terminal_input" and wirelessModemName then
+            rednet.broadcast(serverMessage, TERMINAL_INPUT_PROTOCOL)
         end
     end
 
@@ -499,6 +539,12 @@ while true do
     elseif event == "rednet_message" and arg3 == CONSOLE_RESPONSE_PROTOCOL then
         local payload = arg2
         if type(payload) == "table" and payload.type == "console_output" then
+            payload.computerId = payload.computerId or arg1
+            server:send(payload)
+        end
+    elseif event == "rednet_message" and arg3 == TERMINAL_FRAME_PROTOCOL then
+        local payload = arg2
+        if type(payload) == "table" and payload.type == "terminal_frame" then
             payload.computerId = payload.computerId or arg1
             server:send(payload)
         end

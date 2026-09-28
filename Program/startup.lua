@@ -24,6 +24,11 @@ end
 
 local PROGRAMS = {
     {
+        path = "remote_terminal.lua",
+        title = "Remote Terminal",
+        shouldRun = function() return true end,
+    },
+    {
         path = "reactor.lua",
         title = "Reactor",
         shouldRun = reactorIsReady,

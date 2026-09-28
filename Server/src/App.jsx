@@ -6,6 +6,7 @@ const initialState = {
   turbines: [],
   storage: { online: false, connected: false, items: [] },
   computers: {},
+  terminals: {},
   consoleHistory: [],
   lastCommand: null,
 };
@@ -103,15 +104,60 @@ function MatrixPanel({ matrix }) {
   );
 }
 
-function ReactorPanel({ reactor, sendCommand, commandResult }) {
+function formatFluid(value) {
+  const amount = Number(value || 0);
+  if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(2)} M mB`;
+  if (amount >= 1_000) return `${(amount / 1_000).toFixed(2)} k mB`;
+  return `${amount.toFixed(0)} mB`;
+}
+
+function TankGauge({ label, percent, amount, capacity, tone = "cyan" }) {
+  const level = Math.max(0, Math.min(100, Number(percent || 0)));
+  return (
+    <article className={`tank-gauge ${tone}`}>
+      <div className="tank-shell"><span style={{ height: `${level}%` }} /></div>
+      <div className="tank-copy">
+        <span>{label}</span>
+        <strong>{level.toFixed(1)}%</strong>
+        <small>{formatFluid(amount)} / {formatFluid(capacity)}</small>
+      </div>
+    </article>
+  );
+}
+
+function LineChart({ title, points, field, unit, color, minimumMax = 1 }) {
+  const values = points.map((point) => Number(point[field] || 0));
+  const max = Math.max(minimumMax, ...values);
+  const polyline = values.map((value, index) => {
+    const x = values.length <= 1 ? 100 : (index / (values.length - 1)) * 100;
+    const y = 58 - (Math.max(0, value) / max) * 52;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+  const current = values.at(-1) || 0;
+
+  return (
+    <article className="chart-card">
+      <div><span>{title}</span><strong>{current.toFixed(1)} {unit}</strong></div>
+      <svg viewBox="0 0 100 64" preserveAspectRatio="none" aria-label={`${title} history`}>
+        <path d="M0 58H100M0 32H100M0 6H100" className="chart-grid-line" />
+        {polyline && <polyline points={polyline} style={{ stroke: color }} />}
+      </svg>
+      <small>Последние {Math.max(1, points.length)} сек.</small>
+    </article>
+  );
+}
+
+function ReactorPanel({ reactor, history, sendCommand, commandResult }) {
   const data = reactor.data || {};
   const [startPercent, setStartPercent] = useState(data.startPercent ?? 80);
   const [stopPercent, setStopPercent] = useState(data.stopPercent ?? 98);
+  const [burnRate, setBurnRate] = useState(data.burnRate ?? 0);
 
   useEffect(() => {
     if (data.startPercent != null) setStartPercent(data.startPercent);
     if (data.stopPercent != null) setStopPercent(data.stopPercent);
-  }, [data.startPercent, data.stopPercent]);
+    if (data.burnRate != null) setBurnRate(data.burnRate);
+  }, [data.startPercent, data.stopPercent, data.burnRate]);
 
   return (
     <section className="page-grid">
@@ -132,10 +178,16 @@ function ReactorPanel({ reactor, sendCommand, commandResult }) {
           <Metric label="Damage" value={`${Number(data.damage || 0).toFixed(2)}%`} tone={Number(data.damage) > 0 ? "danger" : "good"} />
           <Metric label="Burn rate" value={`${Number(data.actualBurnRate || 0).toFixed(2)} mB/t`} hint={`Max ${Number(data.maxBurnRate || 0).toFixed(1)}`} />
           <Metric label="Heating" value={`${Number(data.heatingRate || 0).toFixed(1)} mB/t`} />
-          <Metric label="Coolant" value={`${Number(data.coolantPercent || 0).toFixed(1)}%`} />
-          <Metric label="Heated coolant" value={`${Number(data.heatedCoolantPercent || 0).toFixed(1)}%`} />
-          <Metric label="Fuel" value={`${Number(data.fuelPercent || 0).toFixed(1)}%`} />
-          <Metric label="Waste" value={`${Number(data.wastePercent || 0).toFixed(1)}%`} tone={Number(data.wastePercent) > 80 ? "danger" : "default"} />
+        </div>
+        <div className="tank-grid">
+          <TankGauge label="Охлаждающая жидкость" percent={data.coolantPercent} amount={data.coolant} capacity={data.coolantCapacity} tone="cyan" />
+          <TankGauge label="Топливо" percent={data.fuelPercent} amount={data.fuel} capacity={data.fuelCapacity} tone="lime" />
+          <TankGauge label="Нагретая жидкость" percent={data.heatedCoolantPercent} amount={data.heatedCoolant} capacity={data.heatedCoolantCapacity} tone="orange" />
+          <TankGauge label="Ядерные отходы" percent={data.wastePercent} amount={data.waste} capacity={data.wasteCapacity} tone="waste" />
+        </div>
+        <div className="chart-grid">
+          <LineChart title="Температура" points={history} field="temperature" unit="K" color="#ff8a65" minimumMax={1200} />
+          <LineChart title="Скорость нагрева" points={history} field="heatingRate" unit="mB/t" color="#ffd166" minimumMax={1} />
         </div>
       </article>
 
@@ -144,6 +196,9 @@ function ReactorPanel({ reactor, sendCommand, commandResult }) {
         <label>Start at<div className="number-field"><input type="number" min="0" max="99" value={startPercent} onChange={(event) => setStartPercent(Number(event.target.value))} /><span>%</span></div></label>
         <label>Stop at<div className="number-field"><input type="number" min="1" max="100" value={stopPercent} onChange={(event) => setStopPercent(Number(event.target.value))} /><span>%</span></div></label>
         <button className="button primary" disabled={!reactor.online} onClick={() => sendCommand("set_thresholds", { startPercent, stopPercent })}>Save thresholds</button>
+        <label>Лимит сгорания<div className="number-field"><input type="number" min="0" max={Number(data.maxBurnRate || 0)} step="0.1" value={burnRate} onChange={(event) => setBurnRate(Number(event.target.value))} /><span>mB/t</span></div></label>
+        <input className="burn-slider" type="range" min="0" max={Math.max(0.1, Number(data.maxBurnRate || 0))} step="0.1" value={Math.min(burnRate, Math.max(0.1, Number(data.maxBurnRate || 0)))} onChange={(event) => setBurnRate(Number(event.target.value))} />
+        <button className="button primary" disabled={!reactor.online || burnRate < 0 || burnRate > Number(data.maxBurnRate || 0)} onClick={() => sendCommand("set_burn_rate", { burnRate })}>Применить лимит</button>
         <div className="button-row">
           <button className="button success" disabled={!reactor.online || data.running} onClick={() => sendCommand("reactor_start")}>Start</button>
           <button className="button danger" disabled={!reactor.online || !data.running} onClick={() => sendCommand("reactor_scram")}>SCRAM</button>
@@ -239,59 +294,134 @@ function StoragePanel({ storage }) {
   );
 }
 
-function ConsolePanel({ computers, storage, history, sendConsoleCommand }) {
-  const [target, setTarget] = useState("reactor");
-  const [command, setCommand] = useState("status");
-  const [localHistory, setLocalHistory] = useState(history || []);
-  const bottomRef = useRef(null);
+const defaultPalette = [
+  "#f0f0f0", "#f2b233", "#e57fd8", "#99b2f2", "#dede6c", "#7fcc19", "#f2b2cc", "#4c4c4c",
+  "#999999", "#4c99b2", "#b266e5", "#3366cc", "#7f664c", "#57a64e", "#cc4c4c", "#111111",
+];
 
-  useEffect(() => setLocalHistory(history || []), [history]);
-  useEffect(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), [localHistory]);
+const browserKeyNames = {
+  Enter: "enter", Backspace: "backspace", Tab: "tab", Escape: "escape", Delete: "delete", Insert: "insert",
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Home: "home", End: "end",
+  PageUp: "pageUp", PageDown: "pageDown", " ": "space", "-": "minus", "=": "equals", "[": "leftBracket",
+  "]": "rightBracket", ";": "semicolon", "'": "apostrophe", "`": "grave", "\\": "backslash", ",": "comma",
+  ".": "period", "/": "slash",
+};
+const digitKeyNames = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
 
-  const targets = useMemo(() => {
-    const result = new Map();
-    for (const computer of Object.values(computers || {})) result.set(computer.role, computer);
-    if (storage.online && !result.has("storage_node")) result.set("storage_node", { role: "storage_node", computerId: storage.computerId, online: true, label: "Rednet relay" });
-    return [...result.values()];
-  }, [computers, storage]);
+function browserKeyName(event) {
+  if (browserKeyNames[event.key]) return browserKeyNames[event.key];
+  if (/^[a-z]$/i.test(event.key)) return event.key.toLowerCase();
+  if (/^[0-9]$/.test(event.key)) return digitKeyNames[Number(event.key)];
+  if (/^F([1-9]|1[0-2])$/.test(event.key)) return event.key.toLowerCase();
+  if (event.key === "Control") return event.location === 2 ? "rightCtrl" : "leftCtrl";
+  if (event.key === "Shift") return event.location === 2 ? "rightShift" : "leftShift";
+  if (event.key === "Alt") return event.location === 2 ? "rightAlt" : "leftAlt";
+  return null;
+}
 
-  function submit(event) {
-    event.preventDefault();
-    const value = command.trim();
-    if (!value) return;
-    if (value === "clear") {
-      setLocalHistory([]);
-      setCommand("");
-      return;
-    }
-    setLocalHistory((current) => [...current, { target, output: `> ${value}`, ok: true, at: Date.now(), local: true }]);
-    sendConsoleCommand(target, value);
-    setCommand("");
+function paletteColor(palette, code) {
+  const index = Number.parseInt(code || "f", 16);
+  const rgb = palette?.[index];
+  return Array.isArray(rgb) ? `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})` : defaultPalette[index] || defaultPalette[15];
+}
+
+function TerminalScreen({ terminal, sendTerminalInput }) {
+  const pressed = useRef(new Set());
+  const screenRef = useRef(null);
+
+  function send(event, values = {}) {
+    if (terminal?.online) sendTerminalInput(terminal.computerId, event, values);
   }
+
+  function onKeyDown(event) {
+    if (!terminal?.online) return;
+    const key = browserKeyName(event);
+    if (key && !pressed.current.has(event.code)) {
+      pressed.current.add(event.code);
+      send("key", { key, held: event.repeat });
+    }
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) send("char", { value: event.key });
+    if (key || event.key.length === 1) event.preventDefault();
+  }
+
+  function onKeyUp(event) {
+    const key = browserKeyName(event);
+    pressed.current.delete(event.code);
+    if (key) {
+      send("key_up", { key });
+      event.preventDefault();
+    }
+  }
+
+  function mousePosition(event) {
+    const bounds = screenRef.current.getBoundingClientRect();
+    return {
+      x: Math.max(1, Math.min(terminal.width, Math.floor(((event.clientX - bounds.left) / bounds.width) * terminal.width) + 1)),
+      y: Math.max(1, Math.min(terminal.height, Math.floor(((event.clientY - bounds.top) / bounds.height) * terminal.height) + 1)),
+    };
+  }
+
+  function mouseButton(event) {
+    return event.button === 2 ? 2 : event.button === 1 ? 3 : 1;
+  }
+
+  return (
+    <div
+      ref={screenRef}
+      className="craftos-screen"
+      style={{ "--term-columns": terminal?.width || 51, "--term-rows": terminal?.height || 19 }}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      onKeyUp={onKeyUp}
+      onPaste={(event) => { send("paste", { value: event.clipboardData.getData("text") }); event.preventDefault(); }}
+      onMouseDown={(event) => { screenRef.current.focus(); send("mouse_click", { button: mouseButton(event), ...mousePosition(event) }); event.preventDefault(); }}
+      onMouseUp={(event) => { send("mouse_up", { button: mouseButton(event), ...mousePosition(event) }); event.preventDefault(); }}
+      onMouseMove={(event) => { if (event.buttons) send("mouse_drag", { button: event.buttons & 2 ? 2 : 1, ...mousePosition(event) }); }}
+      onWheel={(event) => { send("mouse_scroll", { button: event.deltaY > 0 ? 1 : -1, ...mousePosition(event) }); event.preventDefault(); }}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {(terminal?.lines || []).map((line, y) => (
+        <div className="craftos-row" key={y}>
+          {[...(line.text || "")].map((character, x) => {
+            const cursor = terminal.cursorBlink && terminal.cursorX === x + 1 && terminal.cursorY === y + 1;
+            return <span key={x} className={cursor ? "craftos-cursor" : ""} style={{ color: paletteColor(terminal.palette, line.fg?.[x]), backgroundColor: paletteColor(terminal.palette, line.bg?.[x]) }}>{character}</span>;
+          })}
+        </div>
+      ))}
+      {!terminal && <div className="terminal-placeholder">Удалённые терминалы пока не подключены</div>}
+    </div>
+  );
+}
+
+function ConsolePanel({ terminals, sendTerminalInput }) {
+  const terminalList = useMemo(() => Object.values(terminals || {}).sort((a, b) => Number(a.computerId) - Number(b.computerId)), [terminals]);
+  const [target, setTarget] = useState(null);
+  useEffect(() => {
+    if (!terminalList.length) setTarget(null);
+    else if (!terminalList.some((terminal) => String(terminal.computerId) === String(target))) setTarget(String(terminalList[0].computerId));
+  }, [terminalList, target]);
+  const terminal = terminalList.find((entry) => String(entry.computerId) === String(target));
 
   return (
     <section className="console-layout">
       <aside className="computer-list">
-        <p className="eyebrow">CONNECTED COMPUTERS</p>
-        {targets.map((computer) => (
-          <button key={`${computer.role}-${computer.computerId}`} className={target === computer.role ? "selected" : ""} onClick={() => setTarget(computer.role)}>
+        <p className="eyebrow">CRAFTOS TERMINALS</p>
+        {terminalList.map((entry) => (
+          <button key={entry.computerId} className={String(target) === String(entry.computerId) ? "selected" : ""} onClick={() => setTarget(String(entry.computerId))}>
             <span className="computer-icon"><Icon name="terminal" /></span>
-            <span><strong>{computer.label || computer.role}</strong><small>ID {computer.computerId ?? "relay"}</small></span>
-            <i className={computer.online ? "online" : ""} />
+            <span><strong>{entry.label || `Computer ${entry.computerId}`}</strong><small>ID {entry.computerId}</small></span>
+            <i className={entry.online ? "online" : ""} />
           </button>
         ))}
-        {!targets.length && <p className="muted">No CC computers online</p>}
+        {!terminalList.length && <p className="muted">Нет подключённых терминалов</p>}
       </aside>
-      <div className="terminal-card">
-        <div className="terminal-title"><span>KENZU REMOTE DIAGNOSTICS</span><span>{target}</span></div>
-        <div className="terminal-output">
-          {localHistory.filter((entry) => entry.target === target).map((entry, index) => (
-            <pre className={entry.ok ? "" : "failed"} key={`${entry.at}-${index}`}>{entry.output}</pre>
-          ))}
-          <div ref={bottomRef} />
+      <div className="terminal-card craftos-card">
+        <div className="terminal-title"><span>CRAFTOS REMOTE TERMINAL</span><span>{terminal ? `COMPUTER ${terminal.computerId}` : "OFFLINE"}</span></div>
+        <div className="craftos-stage"><TerminalScreen terminal={terminal} sendTerminalInput={sendTerminalInput} /></div>
+        <div className="terminal-actions">
+          <span>Кликните по экрану и печатайте. Работают клавиши, вставка и мышь.</span>
+          <button className="button danger" disabled={!terminal?.online} onClick={() => sendTerminalInput(terminal.computerId, "terminate")}>Terminate</button>
         </div>
-        <form className="terminal-input" onSubmit={submit}><span>$</span><input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="help, status, peripherals, methods <name>" autoComplete="off" /><button type="submit">Run</button></form>
-        <p className="terminal-help">Only safe diagnostic commands are accepted. Use <code>clear</code> to clear this view.</p>
       </div>
     </section>
   );
@@ -313,6 +443,7 @@ export default function App() {
   const [systemState, setSystemState] = useState(initialState);
   const [serverOnline, setServerOnline] = useState(false);
   const [commandResult, setCommandResult] = useState(null);
+  const [reactorHistory, setReactorHistory] = useState([]);
   const socketRef = useRef(null);
 
   useEffect(() => {
@@ -336,17 +467,29 @@ export default function App() {
         }
         if (message.type === "state") { setServerOnline(true); setSystemState(message.state); }
         if (message.type === "matrix_state") setSystemState((current) => ({ ...current, matrix: message.matrix }));
-        if (message.type === "reactor_state") setSystemState((current) => ({ ...current, reactor: message.reactor }));
+        if (message.type === "reactor_state") {
+          setSystemState((current) => ({ ...current, reactor: message.reactor }));
+          if (message.reactor?.data) setReactorHistory((current) => [...current, {
+            at: Date.now(),
+            temperature: Number(message.reactor.data.temperature || 0),
+            heatingRate: Number(message.reactor.data.heatingRate || 0),
+          }].slice(-180));
+        }
         if (message.type === "turbines_state") setSystemState((current) => ({ ...current, turbines: message.turbines }));
         if (message.type === "storage_state") setSystemState((current) => ({ ...current, storage: message.storage }));
         if (message.type === "storage_status") setSystemState((current) => ({ ...current, storage: { ...current.storage, ...message.storage } }));
         if (message.type === "computers_state") setSystemState((current) => ({ ...current, computers: message.computers }));
+        if (message.type === "terminal_frame") setSystemState((current) => ({
+          ...current,
+          terminals: { ...current.terminals, [String(message.terminal.computerId)]: message.terminal },
+        }));
         if (message.type === "system_status") setSystemState((current) => ({
           ...current,
           matrix: message.matrix,
           reactor: message.reactor,
           turbines: message.turbines,
           computers: message.computers,
+          terminals: message.terminals || current.terminals,
           storage: { ...current.storage, ...message.storage },
         }));
         if (message.type === "console_output") setSystemState((current) => ({ ...current, consoleHistory: [...(current.consoleHistory || []), message].slice(-200) }));
@@ -377,6 +520,10 @@ export default function App() {
     send({ type: "console_command", requestId: `${Date.now()}`, target, command });
   }
 
+  function sendTerminalInput(target, event, values = {}) {
+    send({ type: "terminal_input", target: String(target), event, ...values });
+  }
+
   function saveToken(event) {
     event.preventDefault();
     const token = tokenDraft.trim();
@@ -399,10 +546,10 @@ export default function App() {
 
   let content;
   if (activeTab === "matrix") content = <MatrixPanel matrix={systemState.matrix} />;
-  if (activeTab === "reactor") content = <ReactorPanel reactor={systemState.reactor} sendCommand={sendCommand} commandResult={commandResult} />;
+  if (activeTab === "reactor") content = <ReactorPanel reactor={systemState.reactor} history={reactorHistory} sendCommand={sendCommand} commandResult={commandResult} />;
   if (activeTab === "turbine") content = <TurbinesPanel turbines={systemState.turbines || []} />;
   if (activeTab === "storage") content = <StoragePanel storage={systemState.storage} />;
-  if (activeTab === "terminal") content = <ConsolePanel computers={systemState.computers} storage={systemState.storage} history={systemState.consoleHistory} sendConsoleCommand={sendConsoleCommand} />;
+  if (activeTab === "terminal") content = <ConsolePanel terminals={systemState.terminals} sendTerminalInput={sendTerminalInput} />;
 
   return (
     <main className="app-shell">

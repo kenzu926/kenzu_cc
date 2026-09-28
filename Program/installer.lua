@@ -14,6 +14,7 @@ local FILES = {
     "reactor.lua",
     "me_node.lua",
     "turbine.lua",
+    "remote_terminal.lua",
 }
 
 local installDirectory = shell.dir()

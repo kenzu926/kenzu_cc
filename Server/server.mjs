@@ -37,6 +37,7 @@ const state = {
     updatedAt: null,
   },
   computers: {},
+  terminals: {},
   consoleHistory: [],
   lastCommand: null,
 };
@@ -46,6 +47,7 @@ const roleClients = new Map([
   ["reactor", new Set()],
   ["storage_node", new Set()],
   ["turbine", new Set()],
+  ["terminal", new Set()],
 ]);
 const storageSnapshots = new WeakMap();
 const turbineUnits = new Map();
@@ -74,6 +76,7 @@ function publicState() {
     turbines: state.turbines,
     storage: state.storage,
     computers: state.computers,
+    terminals: state.terminals,
     consoleHistory: state.consoleHistory,
     lastCommand: state.lastCommand,
   };
@@ -100,8 +103,15 @@ function broadcastComputers() {
 }
 
 function validateCommand(message) {
-  const allowed = new Set(["reactor_start", "reactor_scram", "set_thresholds"]);
+  const allowed = new Set(["reactor_start", "reactor_scram", "set_thresholds", "set_burn_rate"]);
   if (!allowed.has(message.action)) return "Unknown command";
+  if (message.action === "set_burn_rate") {
+    const burnRate = Number(message.burnRate);
+    if (!Number.isFinite(burnRate) || burnRate < 0 || burnRate > 1_000_000) {
+      return "Burn rate must be a positive number";
+    }
+    return null;
+  }
   if (message.action !== "set_thresholds") return null;
 
   const start = Number(message.startPercent);
@@ -124,6 +134,38 @@ function sendToRole(role, payload) {
     }
   }
   return recipients;
+}
+
+function routeTerminalInput(browser, message) {
+  const target = String(message.target ?? "");
+  const allowedEvents = new Set([
+    "key", "key_up", "char", "paste", "terminate",
+    "mouse_click", "mouse_up", "mouse_drag", "mouse_scroll",
+  ]);
+  if (!target || !allowedEvents.has(message.event)) {
+    send(browser, { type: "terminal_error", message: "Invalid terminal input" });
+    return;
+  }
+
+  const payload = {
+    type: "terminal_input",
+    event: message.event,
+    key: typeof message.key === "string" ? message.key.slice(0, 32) : undefined,
+    value: typeof message.value === "string" ? message.value.slice(0, 4096) : undefined,
+    held: message.held === true,
+    button: Number(message.button),
+    x: Number(message.x),
+    y: Number(message.y),
+  };
+  let recipients = 0;
+  for (const terminalSocket of roleClients.get("terminal") || []) {
+    if (String(terminalSocket.computerId) === target) {
+      send(terminalSocket, payload);
+      recipients += 1;
+    }
+  }
+  if (recipients === 0) recipients = sendToRole("reactor", { ...payload, target });
+  if (recipients === 0) send(browser, { type: "terminal_error", message: "Terminal is offline" });
 }
 
 function routeConsoleCommand(browser, message) {
@@ -230,6 +272,31 @@ websocketServer.on("connection", (socket) => {
       return;
     }
 
+    if (message.type === "terminal_frame" && (socket.role === "terminal" || socket.role === "reactor")) {
+      const sourceComputerId = message.computerId ?? socket.computerId;
+      const key = String(sourceComputerId ?? "unknown");
+      const lines = Array.isArray(message.lines) ? message.lines.slice(0, 80).map((line) => ({
+        text: String(line?.text || "").slice(0, 200),
+        fg: String(line?.fg || "").slice(0, 200),
+        bg: String(line?.bg || "").slice(0, 200),
+      })) : [];
+      state.terminals[key] = {
+        online: true,
+        lastSeen: Date.now(),
+        computerId: sourceComputerId,
+        label: message.label || socket.label || null,
+        width: Math.max(1, Math.min(200, Number(message.width) || 51)),
+        height: Math.max(1, Math.min(80, Number(message.height) || 19)),
+        cursorX: Number(message.cursorX) || 1,
+        cursorY: Number(message.cursorY) || 1,
+        cursorBlink: message.cursorBlink === true,
+        palette: Array.isArray(message.palette) ? message.palette.slice(0, 16) : null,
+        lines,
+      };
+      broadcastToBrowsers({ type: "terminal_frame", terminal: state.terminals[key] });
+      return;
+    }
+
     if (message.type === "turbine_status" && socket.role === "turbine") {
       const key = computerKey(socket.role, socket.computerId);
       turbineUnits.set(key, {
@@ -301,6 +368,7 @@ websocketServer.on("connection", (socket) => {
         action: message.action,
         startPercent: message.startPercent,
         stopPercent: message.stopPercent,
+        burnRate: message.burnRate,
       };
       if (sendToRole("reactor", command) === 0) {
         send(socket, { type: "command_result", ok: false, message: "Reactor computer is offline" });
@@ -321,6 +389,11 @@ websocketServer.on("connection", (socket) => {
 
     if (message.type === "console_command" && socket.role === "browser") {
       routeConsoleCommand(socket, message);
+      return;
+    }
+
+    if (message.type === "terminal_input" && socket.role === "browser") {
+      routeTerminalInput(socket, message);
       return;
     }
 
@@ -350,6 +423,10 @@ websocketServer.on("connection", (socket) => {
       const replacement = [...(roleClients.get(socket.role) || [])]
         .some((candidate) => candidate.computerId === socket.computerId);
       if (!replacement && state.computers[key]) state.computers[key].online = false;
+      if (socket.role === "terminal" && !replacement && state.terminals[String(socket.computerId)]) {
+        state.terminals[String(socket.computerId)].online = false;
+        broadcastToBrowsers({ type: "terminal_frame", terminal: state.terminals[String(socket.computerId)] });
+      }
       broadcastComputers();
     }
   });
@@ -359,6 +436,9 @@ setInterval(() => {
   const now = Date.now();
   for (const computer of Object.values(state.computers)) {
     if (computer.online && now - computer.lastSeen > OFFLINE_AFTER_MS) computer.online = false;
+  }
+  for (const terminal of Object.values(state.terminals)) {
+    if (terminal.online && now - terminal.lastSeen > OFFLINE_AFTER_MS) terminal.online = false;
   }
   if (state.matrix.online && now - state.matrix.lastSeen > OFFLINE_AFTER_MS) state.matrix.online = false;
   if (state.reactor.online && now - state.reactor.lastSeen > OFFLINE_AFTER_MS) state.reactor.online = false;
@@ -373,6 +453,7 @@ setInterval(() => {
     reactor: state.reactor,
     turbines: state.turbines,
     computers: state.computers,
+    terminals: state.terminals,
     storage: {
       online: state.storage.online,
       connected: state.storage.connected,
