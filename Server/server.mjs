@@ -9,7 +9,7 @@ import { WebSocket, WebSocketServer } from "ws";
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const AUTH_TOKEN = process.env.CC_AUTH_TOKEN || "";
-const OFFLINE_AFTER_MS = 10_000;
+const OFFLINE_AFTER_MS = 20_000;
 const CONSOLE_HISTORY_LIMIT = 200;
 const rootDirectory = dirname(fileURLToPath(import.meta.url));
 const distDirectory = join(rootDirectory, "dist");
@@ -231,6 +231,7 @@ websocketServer.on("connection", (socket) => {
         return;
       }
 
+      if (socket.authenticated) roleClients.get(socket.role)?.delete(socket);
       socket.authenticated = true;
       socket.role = String(message.role || "unknown");
       socket.computerId = message.computerId ?? null;

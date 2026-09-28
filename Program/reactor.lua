@@ -8,8 +8,7 @@ local CONSOLE_REQUEST_PROTOCOL = "kenzu_cc.console.request"
 local CONSOLE_RESPONSE_PROTOCOL = "kenzu_cc.console.response"
 local TERMINAL_FRAME_PROTOCOL = "kenzu_cc.terminal.frame"
 local TERMINAL_INPUT_PROTOCOL = "kenzu_cc.terminal.input"
-local REMOTE_NODE_NAME = "computer_1"
-local REMOTE_TIMEOUT = 7 * 1000
+local REMOTE_TIMEOUT = 20 * 1000
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
@@ -515,8 +514,7 @@ while true do
     elseif event == "rednet_message" and arg3 == ME_STATUS_PROTOCOL then
         local payload = arg2
         if type(payload) == "table"
-            and payload.role == "me_node"
-            and payload.node == REMOTE_NODE_NAME then
+            and payload.role == "me_node" then
             lastRemoteHeartbeat = os.epoch("utc")
             remoteMEConnected = payload.meConnected == true
             remoteComputerId = arg1

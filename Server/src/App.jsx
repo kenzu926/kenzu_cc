@@ -336,18 +336,20 @@ function TerminalScreen({ terminal, sendTerminalInput }) {
   function onKeyDown(event) {
     if (!terminal?.online) return;
     const key = browserKeyName(event);
-    if (key && !pressed.current.has(event.code)) {
+    const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+    if (key && !printable && !pressed.current.has(event.code)) {
       pressed.current.add(event.code);
       send("key", { key, held: event.repeat });
     }
-    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) send("char", { value: event.key });
+    if (printable) send("char", { value: event.key });
     if (key || event.key.length === 1) event.preventDefault();
   }
 
   function onKeyUp(event) {
     const key = browserKeyName(event);
     pressed.current.delete(event.code);
-    if (key) {
+    const printable = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+    if (key && !printable) {
       send("key_up", { key });
       event.preventDefault();
     }

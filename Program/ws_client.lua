@@ -16,9 +16,17 @@ function Client.new(role)
     })
     settings.load("server.settings")
 
+    local baseUrl = settings.get("kenzu.serverUrl")
+    local separator = baseUrl:find("?", 1, true) and "&" or "?"
+    -- CC:Tweaked identifies asynchronous WebSocket events by URL. Every
+    -- service on the same computer therefore needs a distinct URL, otherwise
+    -- multiple multishell tabs can claim the same websocket_success event.
+    local connectionUrl = baseUrl .. separator .. "client="
+        .. tostring(role) .. "-" .. tostring(os.getComputerID())
+
     return setmetatable({
         role = role,
-        url = settings.get("kenzu.serverUrl"),
+        url = connectionUrl,
         token = settings.get("kenzu.serverToken"),
         socket = nil,
         connecting = false,

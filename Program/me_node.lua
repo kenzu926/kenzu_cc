@@ -253,7 +253,10 @@ while true do
         drawStatus()
         heartbeatTimer = os.startTimer(HEARTBEAT_INTERVAL)
     elseif event == "timer" and arg1 == storageTimer then
+        -- Refresh the heartbeat before a potentially slow full ME item scan.
+        sendStatus()
         sendStorageSnapshot()
+        sendStatus()
         storageTimer = os.startTimer(STORAGE_INTERVAL)
     elseif event == "peripheral" or event == "peripheral_detach" then
         modemName = findWirelessModem()
