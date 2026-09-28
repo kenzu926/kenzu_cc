@@ -432,10 +432,15 @@ local function handleServerCommand(command)
     end
 
     if command.action == "set_safety" then
+        local newEnergyStart = tonumber(command.energyStartPercent)
+        local newEnergyStop = tonumber(command.energyStopPercent)
         local newSteam = tonumber(command.steamStopPercent)
         local newWater = tonumber(command.waterStopPercent)
         local newFuel = tonumber(command.fuelStopPercent)
-        if not newSteam or not newWater or not newFuel
+        if not newEnergyStart or not newEnergyStop
+            or newEnergyStart < 0 or newEnergyStop > 100
+            or newEnergyStart >= newEnergyStop
+            or not newSteam or not newWater or not newFuel
             or newSteam < 1 or newSteam > 100
             or newWater < 0 or newWater > 99
             or newFuel < 0 or newFuel > 99 then
@@ -446,6 +451,8 @@ local function handleServerCommand(command)
         safetySteamEnabled = command.steamEnabled == true
         safetyWaterEnabled = command.waterEnabled == true
         safetyFuelEnabled = command.fuelEnabled == true
+        startPercent = math.floor(newEnergyStart)
+        stopPercent = math.floor(newEnergyStop)
         steamStopPercent = math.floor(newSteam)
         waterStopPercent = math.floor(newWater)
         fuelStopPercent = math.floor(newFuel)

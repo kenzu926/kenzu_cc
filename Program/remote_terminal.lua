@@ -15,6 +15,19 @@ local shellCoroutine
 local shellFilter
 local lastFrameSignature = nil
 local lastFrameAt = 0
+local frameSequence = 0
+local sessionId = tostring(os.getComputerID()) .. ":" .. tostring(os.epoch("utc"))
+
+local function terminalRole()
+    if peripheral.find("fissionReactorLogicAdapter") then return "reactor" end
+    if peripheral.find("meBridge") or peripheral.find("me_bridge") then return "storage_node" end
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:match("^ae2:controller") then return "storage_node" end
+    end
+    return "computer"
+end
+
+local localRole = terminalRole()
 
 local function openWirelessModem()
     for _, name in ipairs(peripheral.getNames()) do
@@ -109,6 +122,11 @@ local function sendFrame(force)
     local frame, signature = frameSnapshot()
     local now = os.epoch("utc")
     if force or signature ~= lastFrameSignature or now - lastFrameAt >= 4000 then
+        frameSequence = frameSequence + 1
+        frame.sessionId = sessionId
+        frame.sequence = frameSequence
+        frame.terminalRole = localRole
+        frame.sentAt = now
         if server:isConnected() then server:send(frame) end
         if hasRednet then rednet.broadcast(frame, TERMINAL_FRAME_PROTOCOL) end
         lastFrameSignature = signature

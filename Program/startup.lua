@@ -21,6 +21,10 @@ local function turbineIsReady()
     return false
 end
 
+local function overviewMonitorIsReady()
+    return peripheral.isPresent("monitor_1")
+end
+
 local PROGRAMS = {
     {
         path = "gateway.lua",
@@ -36,6 +40,11 @@ local PROGRAMS = {
         path = "remote_terminal.lua",
         title = "Remote Terminal",
         shouldRun = function() return true end,
+    },
+    {
+        path = "overview_monitor.lua",
+        title = "Base Overview",
+        shouldRun = overviewMonitorIsReady,
     },
     {
         path = "reactor.lua",

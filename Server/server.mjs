@@ -66,6 +66,7 @@ const storageSnapshots = new WeakMap();
 const turbineUnits = new Map();
 const dashboardHistory = [];
 const pendingConsole = new Map();
+let pendingSafety = null;
 
 function tokenMatches(candidate) {
   if (typeof candidate !== "string") return false;
@@ -123,7 +124,10 @@ function dashboardSnapshot() {
   );
   const storageMetrics = state.storage.metrics || {};
   const cells = Array.isArray(storageMetrics.cells) ? storageMetrics.cells : [];
-  const safety = reactor.safety || {};
+  if (pendingSafety && pendingSafety.expires <= Date.now()) pendingSafety = null;
+  const safety = pendingSafety
+    ? { ...(reactor.safety || {}), ...pendingSafety.values }
+    : (reactor.safety || {});
 
   return {
     online: {
@@ -210,10 +214,24 @@ function dashboardSnapshot() {
 function dispatchReactorCommand(command) {
   const error = validateCommand(command);
   if (error) return { ok: false, status: 400, error };
-  if (sendToRole("reactor", { type: "command", requestId: `${Date.now()}`, ...command }) === 0) {
+  const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  if (sendToRole("reactor", { type: "command", requestId, ...command }) === 0) {
     return { ok: false, status: 503, error: "Reactor computer is offline" };
   }
-  return { ok: true, status: 202 };
+  return { ok: true, status: 202, requestId };
+}
+
+function safetyMatches(actual, expected) {
+  if (!actual || !expected) return false;
+  return actual.energyEnabled === expected.energyEnabled
+    && actual.steamEnabled === expected.steamEnabled
+    && actual.waterEnabled === expected.waterEnabled
+    && actual.fuelEnabled === expected.fuelEnabled
+    && numeric(actual.energyStartPercent) === expected.energyStartPercent
+    && numeric(actual.energyStopPercent) === expected.energyStopPercent
+    && numeric(actual.steamStopPercent) === expected.steamStopPercent
+    && numeric(actual.waterStopPercent) === expected.waterStopPercent
+    && numeric(actual.fuelStopPercent) === expected.fuelStopPercent;
 }
 
 function computerKey(role, computerId) {
@@ -263,12 +281,16 @@ function validateCommand(message) {
     return null;
   }
   if (message.action === "set_safety") {
+    const energyStart = Number(message.energyStartPercent);
+    const energyStop = Number(message.energyStopPercent);
     const steam = Number(message.steamStopPercent);
     const water = Number(message.waterStopPercent);
     const fuel = Number(message.fuelStopPercent);
-    if (!Number.isFinite(steam) || steam < 1 || steam > 100
-      || !Number.isFinite(water) || water < 0 || water > 99
-      || !Number.isFinite(fuel) || fuel < 0 || fuel > 99) {
+    if (!Number.isInteger(energyStart) || !Number.isInteger(energyStop)
+      || energyStart < 0 || energyStop > 100 || energyStart >= energyStop
+      || !Number.isInteger(steam) || steam < 1 || steam > 100
+      || !Number.isInteger(water) || water < 0 || water > 99
+      || !Number.isInteger(fuel) || fuel < 0 || fuel > 99) {
       return "Safety thresholds are invalid";
     }
     return null;
@@ -479,6 +501,9 @@ websocketServer.on("connection", (socket) => {
         computerId: socket.computerId,
         data: message.data,
       };
+      if (pendingSafety && safetyMatches(message.data?.safety, pendingSafety.values)) {
+        pendingSafety = null;
+      }
       broadcastToBrowsers({ type: "reactor_state", reactor: state.reactor });
       return;
     }
@@ -486,6 +511,11 @@ websocketServer.on("connection", (socket) => {
     if (message.type === "terminal_frame" && (effectiveRole === "terminal" || effectiveRole === "reactor")) {
       const sourceComputerId = message.computerId ?? socket.computerId;
       const key = String(sourceComputerId ?? "unknown");
+      const previous = state.terminals[key];
+      const sessionId = String(message.sessionId || "legacy");
+      const sequence = Math.max(0, Number(message.sequence) || 0);
+      if (sequence > 0 && previous?.sessionId === sessionId
+        && sequence <= (previous.sequence || 0)) return;
       const lines = Array.isArray(message.lines) ? message.lines.slice(0, 80).map((line) => ({
         text: String(line?.text || "").slice(0, 200),
         fg: String(line?.fg || "").slice(0, 200),
@@ -496,6 +526,10 @@ websocketServer.on("connection", (socket) => {
         lastSeen: Date.now(),
         computerId: sourceComputerId,
         label: message.label || socket.label || null,
+        terminalRole: String(message.terminalRole || "computer"),
+        sessionId,
+        sequence,
+        sentAt: Number(message.sentAt) || Date.now(),
         width: Math.max(1, Math.min(200, Number(message.width) || 51)),
         height: Math.max(1, Math.min(80, Number(message.height) || 19)),
         cursorX: Number(message.cursorX) || 1,
@@ -615,6 +649,8 @@ websocketServer.on("connection", (socket) => {
         steamEnabled: message.steamEnabled,
         waterEnabled: message.waterEnabled,
         fuelEnabled: message.fuelEnabled,
+        energyStartPercent: message.energyStartPercent,
+        energyStopPercent: message.energyStopPercent,
         steamStopPercent: message.steamStopPercent,
         waterStopPercent: message.waterStopPercent,
         fuelStopPercent: message.fuelStopPercent,
@@ -632,6 +668,9 @@ websocketServer.on("connection", (socket) => {
         requestId: message.requestId || null,
         at: Date.now(),
       };
+      if (pendingSafety?.requestId === state.lastCommand.requestId && !state.lastCommand.ok) {
+        pendingSafety = null;
+      }
       broadcastToBrowsers({ type: "command_result", ...state.lastCommand });
       return;
     }
@@ -789,30 +828,58 @@ app.post("/command", (request, response) => {
     if (!Object.hasOwn(snapshot.safety, key)) {
       return response.status(400).json({ error: "Unknown safety channel" });
     }
+    const ranges = {
+      energy: [1, 100],
+      steam: [1, 100],
+      water: [0, 99],
+      fuel: [0, 99],
+    };
+    const [minimum, maximum] = ranges[key];
+    const requestedThreshold = Number(value.threshold);
+    if (!Number.isFinite(requestedThreshold)) {
+      return response.status(400).json({ error: "Safety threshold must be a number" });
+    }
     snapshot.safety[key] = {
       enabled: value.enabled === true,
-      threshold: Math.max(0, Math.min(100, Number(value.threshold))),
+      threshold: Math.round(Math.max(minimum, Math.min(maximum, requestedThreshold))),
     };
-    const safetyResult = dispatchReactorCommand({
+    const energyStopPercent = Math.round(snapshot.safety.energy.threshold);
+    const configuredStart = numeric(state.reactor.data?.safety?.energyStartPercent, 80);
+    result = dispatchReactorCommand({
       action: "set_safety",
       energyEnabled: snapshot.safety.energy.enabled,
       steamEnabled: snapshot.safety.steam.enabled,
       waterEnabled: snapshot.safety.water.enabled,
       fuelEnabled: snapshot.safety.fuel.enabled,
-      steamStopPercent: snapshot.safety.steam.threshold,
-      waterStopPercent: snapshot.safety.water.threshold,
-      fuelStopPercent: snapshot.safety.fuel.threshold,
+      energyStartPercent: Math.max(
+        0,
+        Math.min(energyStopPercent - 1, Math.round(configuredStart)),
+      ),
+      energyStopPercent,
+      steamStopPercent: Math.round(snapshot.safety.steam.threshold),
+      waterStopPercent: Math.round(snapshot.safety.water.threshold),
+      fuelStopPercent: Math.round(snapshot.safety.fuel.threshold),
     });
-    if (!safetyResult.ok) result = safetyResult;
-    else if (key === "energy") {
-      const configuredStart = numeric(state.reactor.data?.safety?.energyStartPercent, 80);
-      const stopPercent = Math.max(1, Math.round(snapshot.safety.energy.threshold));
-      result = dispatchReactorCommand({
-        action: "set_thresholds",
-        startPercent: Math.min(stopPercent - 1, Math.round(configuredStart)),
-        stopPercent,
-      });
-    } else result = safetyResult;
+    if (result.ok) {
+      pendingSafety = {
+        requestId: result.requestId,
+        expires: Date.now() + 20_000,
+        values: {
+          energyEnabled: snapshot.safety.energy.enabled,
+          steamEnabled: snapshot.safety.steam.enabled,
+          waterEnabled: snapshot.safety.water.enabled,
+          fuelEnabled: snapshot.safety.fuel.enabled,
+          energyStartPercent: Math.max(
+            0,
+            Math.min(energyStopPercent - 1, Math.round(configuredStart)),
+          ),
+          energyStopPercent,
+          steamStopPercent: Math.round(snapshot.safety.steam.threshold),
+          waterStopPercent: Math.round(snapshot.safety.water.threshold),
+          fuelStopPercent: Math.round(snapshot.safety.fuel.threshold),
+        },
+      };
+    }
   } else {
     result = { ok: false, status: 400, error: "Unknown command" };
   }
