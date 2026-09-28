@@ -8,6 +8,7 @@ local REPOSITORY_BASE_URL =
     "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/"
 
 local FILES = {
+    "installer.lua",
     "startup.lua",
     "update.lua",
     "update_agent.lua",
