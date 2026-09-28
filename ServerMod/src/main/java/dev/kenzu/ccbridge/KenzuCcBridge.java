@@ -9,5 +9,6 @@ public final class KenzuCcBridge {
 
     public KenzuCcBridge() {
         ComputerCraftAPI.registerGenericSource(new Ae2Peripheral());
+        ComputerCraftAPI.registerAPIFactory(KenzuApi::new);
     }
 }

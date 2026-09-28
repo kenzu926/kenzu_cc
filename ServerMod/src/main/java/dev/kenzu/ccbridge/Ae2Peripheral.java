@@ -34,7 +34,7 @@ import java.util.Set;
 
 /** Adds read-only AE2 network information to grid-connected blocks such as a controller. */
 public final class Ae2Peripheral implements GenericPeripheral {
-    private static final String API_VERSION = "1.0.0";
+    private static final String API_VERSION = "1.1.0";
     private static final int MAX_ITEM_ROWS = 8192;
 
     @Override

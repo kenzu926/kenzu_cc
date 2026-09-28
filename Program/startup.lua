@@ -30,6 +30,14 @@ local function overviewRelayIsReady()
         or turbineIsReady()
 end
 
+local function playerDetectorIsReady()
+    if peripheral.isPresent("playerDetector_0") then return true end
+    for _, name in ipairs(peripheral.getNames()) do
+        if name:lower():find("playerdetector", 1, true) then return true end
+    end
+    return false
+end
+
 local PROGRAMS = {
     {
         path = "gateway.lua",
@@ -55,6 +63,11 @@ local PROGRAMS = {
         path = "overview_relay.lua",
         title = "Overview Relay",
         shouldRun = overviewRelayIsReady,
+    },
+    {
+        path = "player_presence.lua",
+        title = "Player Policy",
+        shouldRun = playerDetectorIsReady,
     },
     {
         path = "reactor.lua",

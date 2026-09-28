@@ -22,6 +22,7 @@ local FILES = {
     "remote_terminal.lua",
     "overview_monitor.lua",
     "overview_relay.lua",
+    "player_presence.lua",
     "service_runner.lua",
 }
 

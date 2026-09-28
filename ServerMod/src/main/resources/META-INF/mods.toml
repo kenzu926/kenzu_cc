@@ -9,7 +9,7 @@ displayName="${mod_name}"
 displayTest="IGNORE_SERVER_VERSION"
 authors="kenzu926"
 description='''
-Server-side ComputerCraft API extensions for Applied Energistics 2 monitoring.
+Server-side ComputerCraft API extensions for AE2 monitoring and automatic player-count difficulty control.
 '''
 
 [[dependencies.${mod_id}]]
