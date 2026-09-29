@@ -84,14 +84,61 @@ local function wrap(value, width)
     return result
 end
 
-local function sortedPlans()
+local function plansByState(done)
     local result = {}
-    for _, plan in ipairs(plans) do result[#result + 1] = plan end
+    for _, plan in ipairs(plans) do
+        if (plan.done == true) == done then result[#result + 1] = plan end
+    end
     table.sort(result, function(left, right)
-        if (left.done == true) ~= (right.done == true) then return left.done ~= true end
         return (tonumber(left.number) or 0) < (tonumber(right.number) or 0)
     end)
     return result
+end
+
+local function writeInColumn(monitor, x, y, value, maximumWidth, foreground, background)
+    writeAt(monitor, x, y, tostring(value):sub(1, math.max(0, maximumWidth)),
+        foreground, background)
+end
+
+local function drawPlanColumn(monitor, columnPlans, x, width, firstRow, lastRow, done)
+    local textX = x + 9
+    local textWidth = math.max(8, width - 9)
+    local y = firstRow
+    local rendered = 0
+
+    for _, plan in ipairs(columnPlans) do
+        local label = plan.translationPending and "Translation pending" or plan.text
+        local lines = wrap(label or "Unnamed task", textWidth)
+        local extraRows = done and 1 or 0
+        if y + #lines + extraRows - 1 > lastRow then break end
+
+        writeInColumn(monitor, x, y, done and "[x]" or "[ ]", 3,
+            done and colors.lime or colors.yellow)
+        writeInColumn(monitor, x + 4, y,
+            ("#%s"):format(tostring(plan.number or "?")), 5, colors.lightBlue)
+        for _, line in ipairs(lines) do
+            writeInColumn(monitor, textX, y, line, textWidth,
+                done and colors.lightGray or colors.white)
+            y = y + 1
+        end
+        if done then
+            writeInColumn(monitor, textX, y,
+                "Done by: " .. tostring(plan.completedBy or "Unknown"),
+                textWidth, colors.cyan)
+            y = y + 1
+        end
+        y = y + 1
+        rendered = rendered + 1
+    end
+
+    local remaining = #columnPlans - rendered
+    if remaining > 0 then
+        writeInColumn(monitor, x, lastRow,
+            ("+%d more on website"):format(remaining), width, colors.orange)
+    elseif #columnPlans == 0 then
+        writeInColumn(monitor, x, firstRow, done and "No completed plans" or "No open plans",
+            width, colors.gray)
+    end
 end
 
 local function draw()
@@ -101,47 +148,32 @@ local function draw()
     monitor.setBackgroundColor(colors.black)
     monitor.clear()
 
-    fill(monitor, 1, colors.gray)
-    fill(monitor, 2, colors.gray)
-    fill(monitor, 3, colors.gray)
-    centered(monitor, 2, "BASE PLANS", colors.cyan, colors.gray)
-
     local pending = 0
     for _, plan in ipairs(plans) do
         if plan.done ~= true then pending = pending + 1 end
     end
-    writeAt(monitor, 2, 4, ("OPEN %d   DONE %d   TOTAL %d")
-        :format(pending, #plans - pending, #plans), colors.lightGray)
 
-    local y = 6
-    local availableWidth = math.max(8, width - 13)
-    for index, plan in ipairs(sortedPlans()) do
-        if y > height - 2 then break end
-        local done = plan.done == true
-        local marker = done and "[x]" or "[ ]"
-        local color = done and colors.gray or colors.white
-        writeAt(monitor, 2, y, marker, done and colors.lime or colors.yellow)
-        writeAt(monitor, 6, y, ("#%s"):format(tostring(plan.number or "?")), colors.lightBlue)
-        local label = plan.translationPending and "Translation pending" or plan.text
-        local lines = wrap(label or "Unnamed task", availableWidth)
-        for lineIndex, line in ipairs(lines) do
-            if y > height - 2 then break end
-            writeAt(monitor, 13, y, line, color)
-            y = y + 1
-            if lineIndex == 1 and #lines > 1 then
-                writeAt(monitor, 2, y, " |", colors.gray)
-            end
-        end
-        if index < #plans then y = y + 1 end
+    fill(monitor, 1, colors.gray)
+    fill(monitor, 2, colors.gray)
+    fill(monitor, 3, colors.gray)
+    centered(monitor, 1, "BASE PLANS", colors.cyan, colors.gray)
+    centered(monitor, 2, ".plan help - for help", colors.white, colors.gray)
+    centered(monitor, 3, ("OPEN %d   DONE %d   TOTAL %d")
+        :format(pending, #plans - pending, #plans), colors.lightGray, colors.gray)
+
+    local divider = math.floor(width / 2) + 1
+    local leftX, rightX = 2, divider + 2
+    local leftWidth = math.max(10, divider - leftX - 1)
+    local rightWidth = math.max(10, width - rightX)
+    fill(monitor, 5, colors.gray)
+    writeInColumn(monitor, leftX, 5, "OPEN PLANS", leftWidth, colors.yellow, colors.gray)
+    writeInColumn(monitor, rightX, 5, "COMPLETED", rightWidth, colors.lime, colors.gray)
+    for y = 4, height - 1 do
+        writeAt(monitor, divider, y, "|", colors.gray, colors.black)
     end
 
-    if #plans == 0 then
-        centered(monitor, math.max(7, math.floor(height / 2)),
-            "No plans yet", colors.lightGray)
-    elseif y > height - 2 then
-        writeAt(monitor, math.max(2, width - 18), height - 1,
-            "More on website...", colors.orange)
-    end
+    drawPlanColumn(monitor, plansByState(false), leftX, leftWidth, 7, height - 2, false)
+    drawPlanColumn(monitor, plansByState(true), rightX, rightWidth, 7, height - 2, true)
 
     fill(monitor, height, colors.gray)
     writeAt(monitor, 2, height,

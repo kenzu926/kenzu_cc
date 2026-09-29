@@ -94,7 +94,9 @@ try {
     body: JSON.stringify({ done: true }),
   });
   assert.equal(completed.status, 200);
-  assert.equal((await incomingComplete).plans[0].done, true);
+  const completedFromWeb = (await incomingComplete).plans[0];
+  assert.equal(completedFromWeb.done, true);
+  assert.equal(completedFromWeb.completedBy, "Web panel");
 
   const incomingDelete = nextPlans(socket);
   const deleted = await fetch(`${base}/plans/${plan.id}`, {
@@ -133,7 +135,10 @@ try {
     username: "Kenzu",
     requestId: "chat-complete",
   }));
-  assert.equal((await completeUpdate).plans[0].done, true);
+  const completedFromChat = (await completeUpdate).plans[0];
+  assert.equal(completedFromChat.done, true);
+  assert.equal(completedFromChat.completedBy, "Kenzu");
+  assert.equal(typeof completedFromChat.completedAt, "number");
   assert.match((await completeResult).messages[0], /выполненным/);
   console.log("Plans translation, persistence, and monitor delivery test passed");
 } finally {

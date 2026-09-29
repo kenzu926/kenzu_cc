@@ -181,6 +181,8 @@ function plansPayload() {
         .replace(/[–—]/g, "-")
         .replace(/[^\x20-\x7E]/g, ""),
       done: plan.done === true,
+      completedBy: plan.done === true ? String(plan.completedBy || "Unknown") : null,
+      completedAt: plan.done === true ? Number(plan.completedAt) || null : null,
       translationPending: plan.translationPending === true,
     })),
     updatedAt: Date.now(),
@@ -220,11 +222,14 @@ async function createPlan(russianText) {
   return plan;
 }
 
-function setPlanCompleted(identifier, done) {
+function setPlanCompleted(identifier, done, completedBy = "Web panel") {
   const plan = findPlan(identifier);
   if (!plan) return null;
   plan.done = done;
   plan.completedAt = done ? Date.now() : null;
+  plan.completedBy = done
+    ? (String(completedBy || "Unknown").trim().slice(0, 32) || "Unknown")
+    : null;
   savePlans();
   publishPlans();
   return plan;
@@ -665,7 +670,7 @@ async function handlePlansCommand(message) {
     return [`Добавлен план #${plan.number}: ${plan.russianText}`];
   }
   if (action === "complete") {
-    const plan = setPlanCompleted(message.id, true);
+    const plan = setPlanCompleted(message.id, true, message.username);
     return [plan
       ? `План #${plan.number} отмечен выполненным: ${plan.russianText}`
       : `План #${String(message.id || "?")} не найден`];
@@ -1250,7 +1255,7 @@ app.patch("/plans/:id", (request, response) => {
   if (typeof request.body?.done !== "boolean") {
     return response.status(400).json({ error: "Поле done должно быть логическим" });
   }
-  const plan = setPlanCompleted(request.params.id, request.body.done);
+  const plan = setPlanCompleted(request.params.id, request.body.done, "Web panel");
   if (!plan) return response.status(404).json({ error: "План не найден" });
   return response.json({ plan });
 });
