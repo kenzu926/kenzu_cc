@@ -181,6 +181,8 @@ function plansPayload() {
         .replace(/[–—]/g, "-")
         .replace(/[^\x20-\x7E]/g, ""),
       done: plan.done === true,
+      completedBy: plan.done === true ? String(plan.completedBy || "Unknown") : null,
+      completedAt: plan.done === true ? Number(plan.completedAt) || null : null,
       translationPending: plan.translationPending === true,
     })),
     updatedAt: Date.now(),
@@ -220,11 +222,14 @@ async function createPlan(russianText) {
   return plan;
 }
 
-function setPlanCompleted(identifier, done) {
+function setPlanCompleted(identifier, done, completedBy = "Web panel") {
   const plan = findPlan(identifier);
   if (!plan) return null;
   plan.done = done;
   plan.completedAt = done ? Date.now() : null;
+  plan.completedBy = done
+    ? (String(completedBy || "Unknown").trim().slice(0, 32) || "Unknown")
+    : null;
   savePlans();
   publishPlans();
   return plan;
@@ -396,6 +401,18 @@ function dashboardSnapshot() {
         enabled: safety.fuelEnabled === true,
         threshold: numeric(safety.fuelStopPercent, 5),
       },
+      temperature: {
+        enabled: true,
+        threshold: numeric(safety.temperatureStop, 1100),
+      },
+      damage: {
+        enabled: true,
+        threshold: numeric(safety.damageStopPercent, 0),
+      },
+      waste: {
+        enabled: true,
+        threshold: numeric(safety.wasteStopPercent, 90),
+      },
     },
     terminals: state.terminals,
     plans: state.plans,
@@ -423,7 +440,10 @@ function safetyMatches(actual, expected) {
     && numeric(actual.energyStopPercent) === expected.energyStopPercent
     && numeric(actual.steamStopPercent) === expected.steamStopPercent
     && numeric(actual.waterStopPercent) === expected.waterStopPercent
-    && numeric(actual.fuelStopPercent) === expected.fuelStopPercent;
+    && numeric(actual.fuelStopPercent) === expected.fuelStopPercent
+    && numeric(actual.temperatureStop) === expected.temperatureStop
+    && numeric(actual.damageStopPercent) === expected.damageStopPercent
+    && numeric(actual.wasteStopPercent) === expected.wasteStopPercent;
 }
 
 function computerKey(role, computerId) {
@@ -478,11 +498,17 @@ function validateCommand(message) {
     const steam = Number(message.steamStopPercent);
     const water = Number(message.waterStopPercent);
     const fuel = Number(message.fuelStopPercent);
+    const temperature = Number(message.temperatureStop);
+    const damage = Number(message.damageStopPercent);
+    const waste = Number(message.wasteStopPercent);
     if (!Number.isInteger(energyStart) || !Number.isInteger(energyStop)
       || energyStart < 0 || energyStop > 100 || energyStart >= energyStop
       || !Number.isInteger(steam) || steam < 1 || steam > 100
       || !Number.isInteger(water) || water < 0 || water > 99
-      || !Number.isInteger(fuel) || fuel < 0 || fuel > 99) {
+      || !Number.isInteger(fuel) || fuel < 0 || fuel > 99
+      || !Number.isInteger(temperature) || temperature < 600 || temperature > 1100
+      || !Number.isInteger(damage) || damage < 0 || damage > 10
+      || !Number.isInteger(waste) || waste < 50 || waste > 90) {
       return "Safety thresholds are invalid";
     }
     return null;
@@ -630,6 +656,39 @@ function formattedChatMessage(text) {
   );
 }
 
+function safetyAlertText(message) {
+  const channels = {
+    energy: "Аккумулятор",
+    steam: "Нагретая жидкость",
+    water: "Охлаждающая жидкость",
+    fuel: "Топливо",
+    temperature: "Температура реактора",
+    damage: "Повреждение реактора",
+    waste: "Ядерные отходы",
+  };
+  const channel = String(message.channel || "");
+  const stage = String(message.stage || "");
+  if (channel === "sensors" && stage === "triggered") {
+    return "АВАРИЯ: потеряна критическая телеметрия реактора. Запрошен SCRAM.";
+  }
+  if (channel === "scram" && stage === "failed") {
+    return "КРИТИЧЕСКАЯ АВАРИЯ: реактор не подтвердил SCRAM. Команда повторяется.";
+  }
+  if (!Object.hasOwn(channels, channel)
+    || !["warning", "triggered"].includes(stage)) return null;
+  const value = Number(message.value);
+  const threshold = Number(message.threshold);
+  if (!Number.isFinite(value) || !Number.isFinite(threshold)) return null;
+  const format = (number) => Number.isInteger(number) ? String(number) : number.toFixed(1);
+  const unit = channel === "temperature" ? " K" : "%";
+  if (stage === "warning") {
+    return `ВНИМАНИЕ: ${channels[channel]} — ${format(value)}${unit}. `
+      + `Порог SCRAM: ${format(threshold)}${unit}.`;
+  }
+  return `АВАРИЯ: ${channels[channel]} — ${format(value)}${unit}; `
+    + `достигнут порог ${format(threshold)}${unit}. Запрошен SCRAM.`;
+}
+
 function decodeCodepoints(values) {
   if (!Array.isArray(values) || values.length === 0 || values.length > 240) return "";
   const codepoints = values.map(Number);
@@ -665,7 +724,7 @@ async function handlePlansCommand(message) {
     return [`Добавлен план #${plan.number}: ${plan.russianText}`];
   }
   if (action === "complete") {
-    const plan = setPlanCompleted(message.id, true);
+    const plan = setPlanCompleted(message.id, true, message.username);
     return [plan
       ? `План #${plan.number} отмечен выполненным: ${plan.russianText}`
       : `План #${String(message.id || "?")} не найден`];
@@ -779,6 +838,19 @@ websocketServer.on("connection", (socket) => {
         formattedMessages: messages.map(formattedChatMessage),
         targetService: "plans",
       });
+      return;
+    }
+
+    if (message.type === "safety_alert" && effectiveRole === "reactor") {
+      const alertText = safetyAlertText(message);
+      if (alertText) {
+        sendToRole("plans", {
+          type: "safety_chat",
+          messages: [alertText],
+          formattedMessages: [formattedChatMessage(alertText)],
+          fallbackMessages: ["Reactor safety alert. Check the control panel."],
+        });
+      }
       return;
     }
 
@@ -953,6 +1025,9 @@ websocketServer.on("connection", (socket) => {
         steamStopPercent: message.steamStopPercent,
         waterStopPercent: message.waterStopPercent,
         fuelStopPercent: message.fuelStopPercent,
+        temperatureStop: message.temperatureStop,
+        damageStopPercent: message.damageStopPercent,
+        wasteStopPercent: message.wasteStopPercent,
       };
       if (sendToRole("reactor", command) === 0) {
         send(socket, { type: "command_result", ok: false, message: "Reactor computer is offline" });
@@ -1137,6 +1212,9 @@ app.post("/command", (request, response) => {
       steam: [1, 100],
       water: [0, 99],
       fuel: [0, 99],
+      temperature: [600, 1100],
+      damage: [0, 10],
+      waste: [50, 90],
     };
     const [minimum, maximum] = ranges[key];
     const requestedThreshold = Number(value.threshold);
@@ -1144,7 +1222,9 @@ app.post("/command", (request, response) => {
       return response.status(400).json({ error: "Safety threshold must be a number" });
     }
     snapshot.safety[key] = {
-      enabled: value.enabled === true,
+      enabled: ["temperature", "damage", "waste"].includes(key)
+        ? true
+        : value.enabled === true,
       threshold: Math.round(Math.max(minimum, Math.min(maximum, requestedThreshold))),
     };
     const energyStopPercent = Math.round(snapshot.safety.energy.threshold);
@@ -1163,6 +1243,9 @@ app.post("/command", (request, response) => {
       steamStopPercent: Math.round(snapshot.safety.steam.threshold),
       waterStopPercent: Math.round(snapshot.safety.water.threshold),
       fuelStopPercent: Math.round(snapshot.safety.fuel.threshold),
+      temperatureStop: Math.round(snapshot.safety.temperature.threshold),
+      damageStopPercent: Math.round(snapshot.safety.damage.threshold),
+      wasteStopPercent: Math.round(snapshot.safety.waste.threshold),
     });
     if (result.ok) {
       pendingSafety = {
@@ -1181,6 +1264,9 @@ app.post("/command", (request, response) => {
           steamStopPercent: Math.round(snapshot.safety.steam.threshold),
           waterStopPercent: Math.round(snapshot.safety.water.threshold),
           fuelStopPercent: Math.round(snapshot.safety.fuel.threshold),
+          temperatureStop: Math.round(snapshot.safety.temperature.threshold),
+          damageStopPercent: Math.round(snapshot.safety.damage.threshold),
+          wasteStopPercent: Math.round(snapshot.safety.waste.threshold),
         },
       };
     }
@@ -1250,7 +1336,7 @@ app.patch("/plans/:id", (request, response) => {
   if (typeof request.body?.done !== "boolean") {
     return response.status(400).json({ error: "Поле done должно быть логическим" });
   }
-  const plan = setPlanCompleted(request.params.id, request.body.done);
+  const plan = setPlanCompleted(request.params.id, request.body.done, "Web panel");
   if (!plan) return response.status(404).json({ error: "План не найден" });
   return response.json({ plan });
 });

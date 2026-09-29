@@ -17,7 +17,11 @@ local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local server = WebSocketClient.new("reactor")
 
 local SETTINGS_FILE = "reactor.settings"
-local CHECK_INTERVAL = 1
+local SAFETY_INTERVAL = 0.25
+local TELEMETRY_INTERVAL = 1
+local MAX_ALLOWED_TEMPERATURE = 1100
+local MAX_ALLOWED_DAMAGE_PERCENT = 10
+local MAX_ALLOWED_WASTE_PERCENT = 90
 -- Mekanism's ComputerCraft API reports energy in Joules even when the game UI
 -- is configured to display Forge Energy. Default conversion: 1 FE = 2.5 J.
 local JOULES_PER_FE = 2.5
@@ -40,6 +44,9 @@ settings.define("reactor.safetyFuelEnabled", { default = true, type = "boolean" 
 settings.define("reactor.steamStopPercent", { default = 95, type = "number" })
 settings.define("reactor.waterStopPercent", { default = 10, type = "number" })
 settings.define("reactor.fuelStopPercent", { default = 5, type = "number" })
+settings.define("reactor.temperatureStop", { default = 1100, type = "number" })
+settings.define("reactor.damageStopPercent", { default = 0, type = "number" })
+settings.define("reactor.wasteStopPercent", { default = 90, type = "number" })
 settings.define("reactor.manualHold", {
     description = "Keep the reactor stopped after a manual SCRAM",
     default = false,
@@ -57,6 +64,12 @@ local safetyFuelEnabled = settings.get("reactor.safetyFuelEnabled")
 local steamStopPercent = math.max(1, math.min(100, settings.get("reactor.steamStopPercent")))
 local waterStopPercent = math.max(0, math.min(99, settings.get("reactor.waterStopPercent")))
 local fuelStopPercent = math.max(0, math.min(99, settings.get("reactor.fuelStopPercent")))
+local temperatureStop = math.max(600,
+    math.min(MAX_ALLOWED_TEMPERATURE, settings.get("reactor.temperatureStop")))
+local damageStopPercent = math.max(0,
+    math.min(MAX_ALLOWED_DAMAGE_PERCENT, settings.get("reactor.damageStopPercent")))
+local wasteStopPercent = math.max(50,
+    math.min(MAX_ALLOWED_WASTE_PERCENT, settings.get("reactor.wasteStopPercent")))
 local manualHold = settings.get("reactor.manualHold") == true
 
 -- Keep saved values valid and leave at least 1% between the thresholds.
@@ -106,6 +119,7 @@ local message = wirelessModemName
 local lastRemoteHeartbeat = nil
 local remoteMEConnected = false
 local remoteComputerId = nil
+local alertStages = {}
 
 local buttons = {}
 
@@ -119,6 +133,9 @@ local function saveThresholds()
     settings.set("reactor.steamStopPercent", steamStopPercent)
     settings.set("reactor.waterStopPercent", waterStopPercent)
     settings.set("reactor.fuelStopPercent", fuelStopPercent)
+    settings.set("reactor.temperatureStop", temperatureStop)
+    settings.set("reactor.damageStopPercent", damageStopPercent)
+    settings.set("reactor.wasteStopPercent", wasteStopPercent)
     settings.set("reactor.manualHold", manualHold)
     settings.save(SETTINGS_FILE)
 end
@@ -228,63 +245,221 @@ local function drawScreen()
     monitor.setTextColor(colors.white)
 end
 
-local function readPercent(method, fallback)
-    if not method then return fallback or 0 end
+local function checkedNumber(method)
+    if type(method) ~= "function" then return nil end
     local ok, value = pcall(method)
-    return ok and (tonumber(value) or fallback or 0) or (fallback or 0)
+    if not ok then return nil end
+    return tonumber(value)
 end
 
-local function getSafetyStopReason()
-    if safetyEnergyEnabled and energy >= stopPercent / 100 then return "battery threshold" end
-    if safetySteamEnabled
-        and readPercent(reactor.getHeatedCoolantFilledPercentage) >= steamStopPercent / 100 then
+local function readSafetySnapshot()
+    local statusOk, running = pcall(reactor.getStatus)
+    return {
+        statusValid = statusOk and type(running) == "boolean",
+        running = statusOk and running == true,
+        energy = checkedNumber(matrix.getEnergyFilledPercentage),
+        temperature = checkedNumber(reactor.getTemperature),
+        damage = checkedNumber(reactor.getDamagePercent),
+        coolant = checkedNumber(reactor.getCoolantFilledPercentage),
+        heatedCoolant = checkedNumber(reactor.getHeatedCoolantFilledPercentage),
+        fuel = checkedNumber(reactor.getFuelFilledPercentage),
+        waste = checkedNumber(reactor.getWasteFilledPercentage),
+    }
+end
+
+local function sendSafetyAlert(channel, stage, value, threshold, unit)
+    if not server:isConnected() then return false end
+    return server:send({
+        type = "safety_alert",
+        channel = channel,
+        stage = stage,
+        value = value,
+        threshold = threshold,
+        unit = unit,
+        at = os.epoch("utc"),
+    })
+end
+
+local function risingStage(value, threshold, margin, strict)
+    if value == nil then return 0 end
+    if (strict and value > threshold) or (not strict and value >= threshold) then return 2 end
+    local warningAt = threshold - margin
+    if value > 0 and value >= warningAt then return 1 end
+    return 0
+end
+
+local function fallingStage(value, threshold, margin)
+    if value == nil then return 0 end
+    if value <= threshold then return 2 end
+    if value <= threshold + margin then return 1 end
+    return 0
+end
+
+local function updateAlertStage(channel, stage, value, threshold, unit)
+    local previous = alertStages[channel] or 0
+    if stage == 0 then
+        -- Re-arm only after the value leaves the warning zone completely. This
+        -- prevents chat spam when a measurement oscillates around its limit.
+        alertStages[channel] = 0
+    elseif stage > previous then
+        local stageName = stage == 2 and "triggered" or "warning"
+        if sendSafetyAlert(channel, stageName, value, threshold, unit) then
+            alertStages[channel] = stage
+        end
+    end
+end
+
+local function updateSafetyAlerts(snapshot)
+    updateAlertStage("energy", safetyEnergyEnabled
+            and risingStage(snapshot.energy and snapshot.energy * 100, stopPercent, 10) or 0,
+        snapshot.energy and snapshot.energy * 100, stopPercent, "%")
+    updateAlertStage("steam", safetySteamEnabled
+            and risingStage(snapshot.heatedCoolant and snapshot.heatedCoolant * 100,
+                steamStopPercent, 10) or 0,
+        snapshot.heatedCoolant and snapshot.heatedCoolant * 100, steamStopPercent, "%")
+    updateAlertStage("water", safetyWaterEnabled
+            and fallingStage(snapshot.coolant and snapshot.coolant * 100,
+                waterStopPercent, 10) or 0,
+        snapshot.coolant and snapshot.coolant * 100, waterStopPercent, "%")
+    updateAlertStage("fuel", safetyFuelEnabled
+            and fallingStage(snapshot.fuel and snapshot.fuel * 100,
+                fuelStopPercent, 10) or 0,
+        snapshot.fuel and snapshot.fuel * 100, fuelStopPercent, "%")
+    updateAlertStage("temperature",
+        risingStage(snapshot.temperature, temperatureStop, 100),
+        snapshot.temperature, temperatureStop, " K")
+    updateAlertStage("damage",
+        risingStage(snapshot.damage, damageStopPercent, 1, true),
+        snapshot.damage, damageStopPercent, "%")
+    updateAlertStage("waste",
+        risingStage(snapshot.waste and snapshot.waste * 100, wasteStopPercent, 10),
+        snapshot.waste and snapshot.waste * 100, wasteStopPercent, "%")
+
+    local sensorFault = not snapshot.statusValid
+        or snapshot.temperature == nil or snapshot.damage == nil or snapshot.waste == nil
+        or (safetyEnergyEnabled and snapshot.energy == nil)
+        or (safetySteamEnabled and snapshot.heatedCoolant == nil)
+        or (safetyWaterEnabled and snapshot.coolant == nil)
+        or (safetyFuelEnabled and snapshot.fuel == nil)
+    updateAlertStage("sensors", sensorFault and 2 or 0, nil, nil, "")
+end
+
+local function getSafetyStopReason(snapshot)
+    -- Missing critical telemetry is unsafe: never assume a failed sensor is zero.
+    if not snapshot.statusValid then return "reactor status unavailable" end
+    if snapshot.temperature == nil then return "temperature sensor unavailable" end
+    if snapshot.damage == nil then return "damage sensor unavailable" end
+    if snapshot.waste == nil then return "waste sensor unavailable" end
+    if safetyEnergyEnabled and snapshot.energy == nil then return "battery sensor unavailable" end
+    if safetySteamEnabled and snapshot.heatedCoolant == nil then return "heated coolant sensor unavailable" end
+    if safetyWaterEnabled and snapshot.coolant == nil then return "coolant sensor unavailable" end
+    if safetyFuelEnabled and snapshot.fuel == nil then return "fuel sensor unavailable" end
+
+    -- These limits are mandatory and cannot be disabled from the website.
+    if snapshot.temperature >= temperatureStop then return "high temperature" end
+    if snapshot.damage > damageStopPercent then return "reactor damage" end
+    if snapshot.waste * 100 >= wasteStopPercent then return "waste threshold" end
+
+    if safetyEnergyEnabled and snapshot.energy >= stopPercent / 100 then
+        return "battery threshold"
+    end
+    if safetySteamEnabled and snapshot.heatedCoolant >= steamStopPercent / 100 then
         return "heated coolant threshold"
     end
-    if safetyWaterEnabled
-        and readPercent(reactor.getCoolantFilledPercentage) <= waterStopPercent / 100 then
+    if safetyWaterEnabled and snapshot.coolant <= waterStopPercent / 100 then
         return "coolant threshold"
     end
-    if safetyFuelEnabled
-        and readPercent(reactor.getFuelFilledPercentage) <= fuelStopPercent / 100 then
+    if safetyFuelEnabled and snapshot.fuel <= fuelStopPercent / 100 then
         return "fuel threshold"
     end
 end
 
+local function emergencyScram(reason)
+    stoppedForSafety = true
+    safetyStopReason = reason
+    -- Only the normal battery cycle may restart automatically. Every reactor
+    -- fault stays latched until a player explicitly starts it again.
+    manualHold = reason ~= "battery threshold"
+
+    local commandOk, commandError = pcall(reactor.scram)
+    local statusOk, stillRunning = pcall(reactor.getStatus)
+    reactorRunning = not statusOk or stillRunning == true
+    if commandOk and statusOk and not reactorRunning then
+        message = "SAFETY SCRAM: " .. reason
+        alertStages.scram = 0
+    else
+        message = "SCRAM UNCONFIRMED: " .. reason
+            .. (commandOk and "" or " / " .. tostring(commandError))
+        if (alertStages.scram or 0) < 2
+            and sendSafetyAlert("scram", "failed", nil, nil, "") then
+            alertStages.scram = 2
+        end
+    end
+    saveThresholds()
+    return not reactorRunning
+end
+
+local function activateAndConfirm()
+    local commandOk, commandError = pcall(reactor.activate)
+    local statusOk, actualRunning = pcall(reactor.getStatus)
+    if not commandOk or not statusOk or actualRunning ~= true then
+        reactorRunning = statusOk and actualRunning == true
+        message = "START FAILED: " .. tostring(commandError or "status unconfirmed")
+        return false
+    end
+    reactorRunning = true
+    stoppedForSafety = false
+    safetyStopReason = nil
+    manualHold = false
+    saveThresholds()
+    return true
+end
+
 local function updateController()
-    energy = matrix.getEnergyFilledPercentage()
-    local actualRunning = reactor.getStatus()
+    local snapshot = readSafetySnapshot()
+    if snapshot.energy ~= nil then energy = snapshot.energy end
+    updateSafetyAlerts(snapshot)
+    local actualRunning = snapshot.running
 
     -- A state change made directly in-game is a manual command. Remember a
     -- manual stop so the low-energy automation cannot immediately undo it.
-    if actualRunning ~= reactorRunning then
+    if snapshot.statusValid and actualRunning ~= reactorRunning and not stoppedForSafety then
         manualHold = not actualRunning
-        stoppedForSafety = false
-        safetyStopReason = nil
         saveThresholds()
     end
-    reactorRunning = actualRunning
+    if snapshot.statusValid then reactorRunning = actualRunning end
 
-    local stopReason = getSafetyStopReason()
-    if stopReason and reactorRunning then
-        reactor.scram()
-        reactorRunning = false
-        manualHold = false
-        stoppedForSafety = true
-        safetyStopReason = stopReason
-        message = "Safety stop: " .. stopReason
-    elseif not stopReason and not reactorRunning
-        and not manualHold
-        and ((stoppedForSafety
-                and (safetyStopReason ~= "battery threshold"
-                    or energy <= startPercent / 100))
-            or (not stoppedForSafety
-                and safetyEnergyEnabled
-                and energy <= startPercent / 100)) then
-        reactor.activate()
-        reactorRunning = true
+    local stopReason = getSafetyStopReason(snapshot)
+    if stopReason then
+        if reactorRunning or not snapshot.statusValid then
+            emergencyScram(stopReason)
+        elseif stopReason ~= "battery threshold" then
+            stoppedForSafety = true
+            safetyStopReason = stopReason
+            manualHold = true
+            saveThresholds()
+        end
+        return
+    end
+
+    -- Starting it directly in the reactor GUI is an explicit acknowledgement,
+    -- but only after every mandatory sensor is back in a safe state.
+    if reactorRunning and stoppedForSafety then
         stoppedForSafety = false
         safetyStopReason = nil
-        message = "Started: safety conditions restored"
+        manualHold = false
+        message = "Manual in-game restart acknowledged"
+        saveThresholds()
+    end
+
+    if reactorRunning or manualHold then return end
+    local batteryMayStart = snapshot.energy ~= nil and snapshot.energy <= startPercent / 100
+    if stoppedForSafety then
+        if safetyStopReason == "battery threshold" and batteryMayStart then
+            if activateAndConfirm() then message = "Started: battery below start threshold" end
+        end
+    elseif safetyEnergyEnabled and batteryMayStart then
+        if activateAndConfirm() then message = "Started: battery below start threshold" end
     end
 end
 
@@ -363,6 +538,10 @@ local function sendReactorStatus()
                 steamStopPercent = steamStopPercent,
                 waterStopPercent = waterStopPercent,
                 fuelStopPercent = fuelStopPercent,
+                failSafe = true,
+                temperatureStop = temperatureStop,
+                wasteStopPercent = wasteStopPercent,
+                damageStopPercent = damageStopPercent,
                 stopped = stoppedForSafety,
                 reason = safetyStopReason,
                 manualHold = manualHold,
@@ -444,13 +623,22 @@ local function handleServerCommand(command)
         local newSteam = tonumber(command.steamStopPercent)
         local newWater = tonumber(command.waterStopPercent)
         local newFuel = tonumber(command.fuelStopPercent)
+        local newTemperature = tonumber(command.temperatureStop)
+        local newDamage = tonumber(command.damageStopPercent)
+        local newWaste = tonumber(command.wasteStopPercent)
         if not newEnergyStart or not newEnergyStop
             or newEnergyStart < 0 or newEnergyStop > 100
             or newEnergyStart >= newEnergyStop
             or not newSteam or not newWater or not newFuel
             or newSteam < 1 or newSteam > 100
             or newWater < 0 or newWater > 99
-            or newFuel < 0 or newFuel > 99 then
+            or newFuel < 0 or newFuel > 99
+            or not newTemperature or newTemperature < 600
+            or newTemperature > MAX_ALLOWED_TEMPERATURE
+            or not newDamage or newDamage < 0
+            or newDamage > MAX_ALLOWED_DAMAGE_PERCENT
+            or not newWaste or newWaste < 50
+            or newWaste > MAX_ALLOWED_WASTE_PERCENT then
             sendCommandResult(command, false, "Invalid safety thresholds")
             return
         end
@@ -463,6 +651,9 @@ local function handleServerCommand(command)
         steamStopPercent = math.floor(newSteam)
         waterStopPercent = math.floor(newWater)
         fuelStopPercent = math.floor(newFuel)
+        temperatureStop = math.floor(newTemperature)
+        damageStopPercent = math.floor(newDamage)
+        wasteStopPercent = math.floor(newWaste)
         saveThresholds()
         updateController()
         sendCommandResult(command, true, "Safety settings saved")
@@ -471,7 +662,8 @@ local function handleServerCommand(command)
 
     if command.action == "reactor_scram" then
         local ok, commandError = pcall(reactor.scram)
-        if ok then
+        local statusOk, stillRunning = pcall(reactor.getStatus)
+        if ok and statusOk and stillRunning == false then
             reactorRunning = false
             stoppedForSafety = false
             safetyStopReason = nil
@@ -480,37 +672,37 @@ local function handleServerCommand(command)
             message = "SCRAM from web"
             sendCommandResult(command, true, "Reactor stopped")
         else
-            sendCommandResult(command, false, tostring(commandError))
+            reactorRunning = not statusOk or stillRunning == true
+            manualHold = true
+            saveThresholds()
+            message = "WEB SCRAM UNCONFIRMED"
+            sendCommandResult(command, false,
+                tostring(commandError or "Reactor still reports active"))
         end
         return
     end
 
     if command.action == "reactor_start" then
-        local damage = safeNumber(reactor.getDamagePercent, 100)
-        local coolant = safeNumber(reactor.getCoolantFilledPercentage, 0)
-        local waste = safeNumber(reactor.getWasteFilledPercentage, 1)
+        local snapshot = readSafetySnapshot()
+        local stopReason = getSafetyStopReason(snapshot)
         local forceDisabled = false
         if reactor.isForceDisabled then
             local forceCheckOk, forceCheckValue = pcall(reactor.isForceDisabled)
             forceDisabled = not forceCheckOk or forceCheckValue == true
         end
 
-        if forceDisabled or damage >= 100 or coolant <= 0.05 or waste >= 0.90 then
-            sendCommandResult(command, false, "Safety check blocked reactor start")
+        if forceDisabled or stopReason then
+            sendCommandResult(command, false,
+                "Safety check blocked reactor start: " .. tostring(
+                    forceDisabled and "force-disabled" or stopReason))
             return
         end
 
-        local ok, commandError = pcall(reactor.activate)
-        if ok then
-            reactorRunning = true
-            stoppedForSafety = false
-            safetyStopReason = nil
-            manualHold = false
-            saveThresholds()
+        if activateAndConfirm() then
             message = "Started from web"
             sendCommandResult(command, true, "Reactor started")
         else
-            sendCommandResult(command, false, tostring(commandError))
+            sendCommandResult(command, false, message)
         end
         return
     end
@@ -574,7 +766,8 @@ updateController()
 server:connect()
 drawScreen()
 
-local timer = os.startTimer(CHECK_INTERVAL)
+local safetyTimer = os.startTimer(SAFETY_INTERVAL)
+local telemetryTimer = os.startTimer(TELEMETRY_INTERVAL)
 
 while true do
     local event, arg1, arg2, arg3 = os.pullEvent()
@@ -606,12 +799,15 @@ while true do
         end
     end
 
-    if event == "timer" and arg1 == timer then
+    if event == "timer" and arg1 == safetyTimer then
+        updateController()
+        safetyTimer = os.startTimer(SAFETY_INTERVAL)
+    elseif event == "timer" and arg1 == telemetryTimer then
         server:connect()
         updateController()
         sendReactorStatus()
         drawScreen()
-        timer = os.startTimer(CHECK_INTERVAL)
+        telemetryTimer = os.startTimer(TELEMETRY_INTERVAL)
     elseif event == "monitor_touch" and arg1 == MONITOR_NAME then
         handleTouch(arg2, arg3)
     elseif event == "monitor_resize" and arg1 == MONITOR_NAME then

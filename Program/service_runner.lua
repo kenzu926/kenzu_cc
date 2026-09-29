@@ -2,6 +2,26 @@
 local programPath, serviceName = ...
 serviceName = serviceName or programPath or "Service"
 
+local isReactorService = tostring(programPath):match("reactor%.lua$") ~= nil
+    or tostring(serviceName):lower() == "reactor"
+
+local function failSafeScram()
+    if not isReactorService then return end
+    local adapter = peripheral.wrap("fissionReactorLogicAdapter_0")
+        or peripheral.find("fissionReactorLogicAdapter")
+    if not adapter or type(adapter.scram) ~= "function" then
+        printError("EMERGENCY: reactor adapter unavailable")
+        return
+    end
+    local ok, failure = pcall(adapter.scram)
+    local statusOk, running = pcall(adapter.getStatus)
+    if ok and statusOk and running == false then
+        printError("Emergency SCRAM confirmed after controller failure")
+    else
+        printError("EMERGENCY SCRAM NOT CONFIRMED: " .. tostring(failure or running))
+    end
+end
+
 if not programPath or not fs.exists(programPath) then
     error("Missing service program: " .. tostring(programPath), 0)
 end
@@ -22,8 +42,10 @@ while true do
     else
         print("Service exited.")
     end
+    failSafeScram()
     term.setTextColor(colors.orange)
-    print("Restarting in 3 seconds...")
+    local restartDelay = isReactorService and 0.5 or 3
+    print(("Restarting in %.1f seconds..."):format(restartDelay))
     term.setTextColor(colors.white)
-    sleep(3)
+    sleep(restartDelay)
 end
