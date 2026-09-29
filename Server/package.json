@@ -9,6 +9,8 @@
     "install:ci": "pnpm install --frozen-lockfile",
     "dev": "concurrently -k \"node --watch server.mjs\" \"vite --host 0.0.0.0 --port 5173\"",
     "build": "vite build",
+    "test:invite": "node tests/invite-flow.mjs",
+    "test:plans": "node tests/plans-flow.mjs",
     "test:safety": "node tests/safety-command.mjs",
     "test:terminal": "node tests/terminal-sync.mjs",
     "start": "node server.mjs",

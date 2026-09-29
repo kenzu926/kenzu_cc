@@ -1,7 +1,7 @@
 import express from "express";
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
@@ -9,11 +9,15 @@ import { WebSocket, WebSocketServer } from "ws";
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const AUTH_TOKEN = process.env.CC_AUTH_TOKEN || "";
+const TRANSLATE_API_URL = process.env.TRANSLATE_API_URL || "";
 const OFFLINE_AFTER_MS = 20_000;
 const CONSOLE_HISTORY_LIMIT = 200;
 const HISTORY_LIMIT = 180;
+const INVITE_LIFETIME_MS = 15 * 60 * 1000;
+const BROWSER_SESSION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const rootDirectory = dirname(fileURLToPath(import.meta.url));
 const distDirectory = join(rootDirectory, "dist");
+const plansFile = process.env.PLANS_FILE || join(rootDirectory, "plans.json");
 
 if (AUTH_TOKEN.length < 24) {
   console.error("CC_AUTH_TOKEN must contain at least 24 characters.");
@@ -28,7 +32,7 @@ app.use(express.json({ limit: "64kb" }));
 app.use((request, response, next) => {
   response.set("Access-Control-Allow-Origin", request.get("origin") || "*");
   response.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
-  response.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  response.set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
   if (request.method === "OPTIONS") return response.sendStatus(204);
   return next();
 });
@@ -51,6 +55,7 @@ const state = {
   terminals: {},
   consoleHistory: [],
   lastCommand: null,
+  plans: [],
 };
 
 const clients = new Set();
@@ -60,23 +65,124 @@ const roleClients = new Map([
   ["storage_node", new Set()],
   ["turbine", new Set()],
   ["terminal", new Set()],
+  ["plans", new Set()],
 ]);
-const GATEWAY_SERVICES = new Set(["reactor", "storage_node", "turbine", "terminal"]);
+const GATEWAY_SERVICES = new Set(["reactor", "storage_node", "turbine", "terminal", "plans"]);
 const storageSnapshots = new WeakMap();
 const turbineUnits = new Map();
 const dashboardHistory = [];
 const pendingConsole = new Map();
+const inviteCodes = new Map();
 let pendingSafety = null;
 
-function tokenMatches(candidate) {
+function masterTokenMatches(candidate) {
   if (typeof candidate !== "string") return false;
   const supplied = Buffer.from(candidate);
   const expected = Buffer.from(AUTH_TOKEN);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
+function tokenMatches(candidate) {
+  if (masterTokenMatches(candidate)) return true;
+  if (typeof candidate !== "string") return false;
+  const [prefix, expiresText, nonce, signature] = candidate.split(".");
+  const expiresAt = Number(expiresText);
+  if (prefix !== "session" || !Number.isFinite(expiresAt) || expiresAt <= Date.now()
+    || !nonce || !signature) return false;
+  const expected = createHmac("sha256", AUTH_TOKEN)
+    .update(`${expiresText}.${nonce}`)
+    .digest("base64url");
+  const suppliedBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  return suppliedBuffer.length === expectedBuffer.length
+    && timingSafeEqual(suppliedBuffer, expectedBuffer);
+}
+
+function createBrowserSession(expiresAt) {
+  const expiresText = String(expiresAt);
+  const nonce = randomBytes(18).toString("base64url");
+  const signature = createHmac("sha256", AUTH_TOKEN)
+    .update(`${expiresText}.${nonce}`)
+    .digest("base64url");
+  return `session.${expiresText}.${nonce}.${signature}`;
+}
+
 function send(socket, payload) {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+}
+
+function loadPlans() {
+  if (!existsSync(plansFile)) return;
+  try {
+    const parsed = JSON.parse(readFileSync(plansFile, "utf8"));
+    if (Array.isArray(parsed)) state.plans = parsed.slice(0, 100);
+  } catch (error) {
+    console.error("Cannot read plans.json:", error);
+  }
+}
+
+function savePlans() {
+  const temporaryFile = `${plansFile}.tmp`;
+  writeFileSync(temporaryFile, `${JSON.stringify(state.plans, null, 2)}\n`, "utf8");
+  renameSync(temporaryFile, plansFile);
+}
+
+async function translatePlan(text) {
+  if (!/[А-Яа-яЁё]/.test(text)) return text;
+  const endpoint = TRANSLATE_API_URL
+    ? TRANSLATE_API_URL.replace("{text}", encodeURIComponent(text))
+    : "https://translate.googleapis.com/translate_a/single"
+      + `?client=gtx&sl=ru&tl=en&dt=t&q=${encodeURIComponent(text)}`;
+  const response = await fetch(endpoint, { signal: AbortSignal.timeout(8_000) });
+  if (!response.ok) throw new Error(`Translation HTTP ${response.status}`);
+  const payload = await response.json();
+  const translated = typeof payload?.translatedText === "string"
+    ? payload.translatedText.trim()
+    : Array.isArray(payload?.[0])
+    ? payload[0].map((part) => String(part?.[0] || "")).join("").trim()
+    : "";
+  if (!translated) throw new Error("Translator returned an empty result");
+  return translated;
+}
+
+function plansPayload() {
+  return {
+    type: "plans_update",
+    plans: state.plans.map((plan) => ({
+      id: plan.id,
+      text: String(plan.englishText || "Translation pending")
+        .normalize("NFKD")
+        .replace(/[‘’]/g, "'")
+        .replace(/[“”]/g, "\"")
+        .replace(/[–—]/g, "-")
+        .replace(/[^\x20-\x7E]/g, ""),
+      done: plan.done === true,
+      translationPending: plan.translationPending === true,
+    })),
+    updatedAt: Date.now(),
+  };
+}
+
+function publishPlans() {
+  const payload = plansPayload();
+  sendToRole("plans", payload);
+  broadcastToBrowsers(payload);
+}
+
+async function retryPendingTranslations() {
+  const pending = state.plans.filter((plan) => plan.translationPending === true);
+  let changed = false;
+  for (const plan of pending) {
+    try {
+      plan.englishText = await translatePlan(plan.russianText);
+      plan.translationPending = false;
+      changed = true;
+    } catch {}
+  }
+  if (changed) {
+    savePlans();
+    publishPlans();
+  }
 }
 
 function broadcastToBrowsers(payload) {
@@ -95,8 +201,11 @@ function publicState() {
     terminals: state.terminals,
     consoleHistory: state.consoleHistory,
     lastCommand: state.lastCommand,
+    plans: state.plans,
   };
 }
+
+loadPlans();
 
 function requestToken(request) {
   const authorization = request.get("authorization") || "";
@@ -106,6 +215,12 @@ function requestToken(request) {
 function requireToken(request, response) {
   if (tokenMatches(requestToken(request))) return true;
   response.status(401).json({ error: "Unauthorized" });
+  return false;
+}
+
+function requireMasterToken(request, response) {
+  if (masterTokenMatches(requestToken(request))) return true;
+  response.status(403).json({ error: "Only the panel owner can create invitations" });
   return false;
 }
 
@@ -207,6 +322,7 @@ function dashboardSnapshot() {
       },
     },
     terminals: state.terminals,
+    plans: state.plans,
     history: dashboardHistory,
   };
 }
@@ -423,7 +539,11 @@ websocketServer.on("connection", (socket) => {
     }
 
     if (message.type === "hello") {
-      if (!tokenMatches(message.token)) {
+      const requestedRole = String(message.role || "unknown");
+      const authenticated = requestedRole === "browser"
+        ? tokenMatches(message.token)
+        : masterTokenMatches(message.token);
+      if (!authenticated) {
         send(socket, { type: "auth_error", message: "Invalid access token" });
         socket.close(1008, "Invalid access token");
         return;
@@ -431,7 +551,7 @@ websocketServer.on("connection", (socket) => {
 
       if (socket.authenticated) roleClients.get(socket.role)?.delete(socket);
       socket.authenticated = true;
-      socket.role = String(message.role || "unknown");
+      socket.role = requestedRole;
       socket.computerId = message.computerId ?? null;
       socket.label = message.label ?? null;
       roleClients.get(socket.role)?.add(socket);
@@ -439,7 +559,10 @@ websocketServer.on("connection", (socket) => {
       touchRoleState(socket);
 
       if (socket.role === "browser") send(socket, { type: "state", state: publicState() });
-      else broadcastComputers();
+      else {
+        if (socket.role === "plans") send(socket, plansPayload());
+        broadcastComputers();
+      }
       return;
     }
 
@@ -467,6 +590,7 @@ websocketServer.on("connection", (socket) => {
       }
       socket.services = nextServices;
       for (const service of socket.services) touchComputer(socket, service);
+      if (socket.services.has("plans")) send(socket, { ...plansPayload(), targetService: "plans" });
       broadcastComputers();
       return;
     }
@@ -759,6 +883,9 @@ websocketServer.on("connection", (socket) => {
 
 setInterval(() => {
   const now = Date.now();
+  for (const [code, expiresAt] of inviteCodes) {
+    if (expiresAt <= now) inviteCodes.delete(code);
+  }
   for (const computer of Object.values(state.computers)) {
     if (computer.online && now - computer.lastSeen > OFFLINE_AFTER_MS) computer.online = false;
   }
@@ -801,6 +928,8 @@ setInterval(() => {
     },
   });
 }, 2_000);
+
+setInterval(() => void retryPendingTranslations(), 60_000);
 
 app.get("/api/state", (request, response) => {
   if (!requireToken(request, response)) return;
@@ -924,7 +1053,82 @@ app.post("/terminal", async (request, response) => {
   });
   return response.json(output);
 });
+app.get("/plans", (request, response) => {
+  if (!requireToken(request, response)) return;
+  return response.json({ plans: state.plans });
+});
+app.post("/plans", async (request, response) => {
+  if (!requireToken(request, response)) return;
+  const russianText = String(request.body?.text || "").trim();
+  if (!russianText || russianText.length > 240) {
+    return response.status(400).json({ error: "План должен содержать от 1 до 240 символов" });
+  }
+  if (state.plans.length >= 100) {
+    return response.status(409).json({ error: "Список ограничен 100 задачами" });
+  }
+
+  const plan = {
+    id: randomUUID(),
+    russianText,
+    englishText: "Translation pending",
+    translationPending: true,
+    done: false,
+    createdAt: Date.now(),
+  };
+  try {
+    plan.englishText = await translatePlan(russianText);
+    plan.translationPending = false;
+  } catch (error) {
+    console.error("Plan translation failed:", error);
+  }
+  state.plans.push(plan);
+  savePlans();
+  publishPlans();
+  return response.status(201).json({ plan });
+});
+app.patch("/plans/:id", (request, response) => {
+  if (!requireToken(request, response)) return;
+  const plan = state.plans.find((candidate) => candidate.id === request.params.id);
+  if (!plan) return response.status(404).json({ error: "План не найден" });
+  if (typeof request.body?.done !== "boolean") {
+    return response.status(400).json({ error: "Поле done должно быть логическим" });
+  }
+  plan.done = request.body.done;
+  plan.completedAt = plan.done ? Date.now() : null;
+  savePlans();
+  publishPlans();
+  return response.json({ plan });
+});
+app.delete("/plans/:id", (request, response) => {
+  if (!requireToken(request, response)) return;
+  const index = state.plans.findIndex((candidate) => candidate.id === request.params.id);
+  if (index < 0) return response.status(404).json({ error: "План не найден" });
+  const [plan] = state.plans.splice(index, 1);
+  savePlans();
+  publishPlans();
+  return response.json({ plan });
+});
 app.get("/health", (_request, response) => response.json({ ok: true }));
+app.post("/invite", (request, response) => {
+  if (!requireMasterToken(request, response)) return;
+  const code = randomBytes(24).toString("base64url");
+  const expiresAt = Date.now() + INVITE_LIFETIME_MS;
+  inviteCodes.set(code, expiresAt);
+  return response.status(201).json({ code, expiresAt });
+});
+app.post("/invite/redeem", (request, response) => {
+  const code = String(request.body?.code || "");
+  const inviteExpiresAt = inviteCodes.get(code);
+  if (!inviteExpiresAt || inviteExpiresAt <= Date.now()) {
+    inviteCodes.delete(code);
+    return response.status(410).json({ error: "Invitation is invalid or expired" });
+  }
+
+  inviteCodes.delete(code);
+  const expiresAt = Date.now() + BROWSER_SESSION_LIFETIME_MS;
+  const sessionToken = createBrowserSession(expiresAt);
+  return response.json({ token: sessionToken, expiresAt });
+});
 
 if (existsSync(join(distDirectory, "index.html"))) {
   app.use(express.static(distDirectory));
