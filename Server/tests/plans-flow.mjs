@@ -109,7 +109,7 @@ try {
   socket.send(JSON.stringify({
     type: "plans_command",
     action: "add",
-    text: "Построить вторую турбину",
+    textCodepoints: [..."Построить вторую турбину"].map((character) => character.codePointAt(0)),
     username: "Kenzu",
     requestId: "chat-add",
   }));

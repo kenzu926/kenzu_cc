@@ -13,7 +13,7 @@
 
 1. Соберите проект указанной выше командой или возьмите уже собранный JAR из
    `build/libs`.
-2. Положите `build/libs/kenzu_cc_bridge-1.0.0.jar` в серверную папку `mods`.
+2. Удалите предыдущую версию мода и положите `build/libs/kenzu_cc_bridge-1.2.0.jar` в серверную папку `mods`.
 3. Перезапустите Minecraft-сервер полностью.
 4. Подключите проводной модем к контроллеру AE2 и включите красную рамку модема.
 5. На CC-пк выполните `update` или переустановите программу обычной командой installer.
@@ -25,5 +25,9 @@ local p = peripheral.wrap("ae2:controller_0")
 print(p.getKenzuApiVersion())
 print(textutils.serialize(p.getStorageStats()))
 ```
+
+Глобальный API `kenzu.pollPlanChatMessages()` передаёт команды `.plan` в виде
+Unicode-кодов. Это сохраняет кириллицу, даже если Chat Box заменяет её на `?` в
+обычном событии `chat`.
 
 Методы только читают состояние AE2. Они не извлекают и не записывают предметы.

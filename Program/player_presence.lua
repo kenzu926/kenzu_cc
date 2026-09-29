@@ -36,7 +36,7 @@ end
 
 local function syncPolicy()
     if type(kenzu) ~= "table" or type(kenzu.syncPlayerDifficulty) ~= "function" then
-        lastResult = "Kenzu CC Bridge 1.1.0 is not installed"
+        lastResult = "Kenzu CC Bridge 1.2.0 is not installed"
         return
     end
     local ok, result = pcall(kenzu.syncPlayerDifficulty)

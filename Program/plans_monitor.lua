@@ -160,6 +160,16 @@ local function getChatBox()
     return peripheral.wrap(CHATBOX_NAME) or peripheral.find("chatBox")
 end
 
+local function toCodepoints(value)
+    local result = {}
+    local ok = pcall(function()
+        for _, codepoint in utf8.codes(tostring(value or "")) do
+            result[#result + 1] = codepoint
+        end
+    end)
+    return ok and result or nil
+end
+
 local function sendChat(messages, username, formattedMessages)
     local chatBox = getChatBox()
     if not chatBox or type(username) ~= "string" or username == "" then return end
@@ -205,7 +215,7 @@ local function handleChatCommand(username, rawMessage)
         server:send({
             type = "plans_command",
             action = "add",
-            text = argument,
+            textCodepoints = toCodepoints(argument),
             username = username,
             requestId = tostring(os.epoch("utc")),
         })
@@ -238,8 +248,32 @@ local function handleChatCommand(username, rawMessage)
     sendChat({ "Unknown command. Use .plan help" }, username)
 end
 
+local function hasUnicodeChatBridge()
+    return type(kenzu) == "table" and type(kenzu.pollPlanChatMessages) == "function"
+end
+
+local function pollUnicodeChat()
+    if not hasUnicodeChatBridge() then return end
+    local ok, batch = pcall(kenzu.pollPlanChatMessages)
+    if not ok or type(batch) ~= "table" or type(batch.messages) ~= "table" then return end
+    for _, chatMessage in ipairs(batch.messages) do
+        local characters = {}
+        if type(chatMessage.codepoints) == "table" then
+            for _, codepoint in ipairs(chatMessage.codepoints) do
+                local valid, character = pcall(utf8.char, tonumber(codepoint))
+                if valid then characters[#characters + 1] = character end
+            end
+        end
+        local rawMessage = table.concat(characters)
+        if rawMessage:match("^%$?%.plan") then
+            handleChatCommand(tostring(chatMessage.username or ""), rawMessage)
+        end
+    end
+end
+
 loadCache()
 server:connect()
+pollUnicodeChat()
 draw()
 local timer = os.startTimer(REFRESH_INTERVAL)
 
@@ -266,12 +300,13 @@ while true do
 
     if event == "timer" and arg1 == timer then
         server:connect()
+        pollUnicodeChat()
         draw()
         timer = os.startTimer(REFRESH_INTERVAL)
     elseif (event == "monitor_resize" and arg1 == MONITOR_NAME)
         or event == "peripheral" or event == "peripheral_detach" then
         draw()
-    elseif event == "chat" then
+    elseif event == "chat" and not hasUnicodeChatBridge() then
         local username = arg1
         local utf8Message = arg5 or arg2
         if tostring(utf8Message or ""):match("^%$?%.plan") then
@@ -279,7 +314,7 @@ while true do
             if server:isConnected() or subcommand == "" or subcommand:lower() == "help" then
                 handleChatCommand(username, utf8Message)
             else
-                sendChat({ "Сервер планов недоступен" }, username)
+                sendChat({ "Plans server is unavailable" }, username)
             end
         end
     end

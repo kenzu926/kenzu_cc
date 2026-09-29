@@ -630,6 +630,14 @@ function formattedChatMessage(text) {
   );
 }
 
+function decodeCodepoints(values) {
+  if (!Array.isArray(values) || values.length === 0 || values.length > 240) return "";
+  const codepoints = values.map(Number);
+  if (codepoints.some((value) => !Number.isInteger(value)
+    || value < 0 || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))) return "";
+  return String.fromCodePoint(...codepoints);
+}
+
 async function handlePlansCommand(message) {
   const action = String(message.action || "help").toLowerCase();
   if (action === "help") {
@@ -648,7 +656,9 @@ async function handlePlansCommand(message) {
     )));
   }
   if (action === "add") {
-    const text = String(message.text || "").trim();
+    const text = (message.textCodepoints !== undefined
+      ? decodeCodepoints(message.textCodepoints)
+      : String(message.text || "")).trim();
     if (!text || text.length > 240) return ["Название должно содержать от 1 до 240 символов"];
     if (state.plans.length >= 100) return ["Список ограничен 100 задачами"];
     const plan = await createPlan(text);
