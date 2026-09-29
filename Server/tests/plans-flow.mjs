@@ -119,6 +119,10 @@ try {
   const addResult = await chatResult;
   assert.equal(addResult.username, "Kenzu");
   assert.match(addResult.messages[0], /#2/);
+  assert.equal(addResult.formattedMessages.length, addResult.messages.length);
+  assert.match(addResult.formattedMessages[0], /\\u[0-9a-f]{4}/i);
+  assert.doesNotMatch(addResult.formattedMessages[0], /[^\x20-\x7e]/);
+  assert.equal(JSON.parse(addResult.formattedMessages[0]).text, addResult.messages[0]);
 
   const completeUpdate = nextPlans(socket);
   const completeResult = nextMessage(socket, "plans_result");

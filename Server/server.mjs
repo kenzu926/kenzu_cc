@@ -619,6 +619,17 @@ function packChatLines(lines, maximumLength = 220, maximumMessages = 8) {
   return messages;
 }
 
+// Chat Box strings normally pass through ComputerCraft's terminal character
+// encoding. Keep the wire payload ASCII-only and let Minecraft's JSON parser
+// decode Unicode escapes instead. This works even on AP versions where the
+// utf8Support argument is missing or unreliable.
+function formattedChatMessage(text) {
+  return JSON.stringify({ text: String(text) }).replace(
+    /[^\x20-\x7E]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 async function handlePlansCommand(message) {
   const action = String(message.action || "help").toLowerCase();
   if (action === "help") {
@@ -755,6 +766,7 @@ websocketServer.on("connection", (socket) => {
         requestId: message.requestId || null,
         username: String(message.username || ""),
         messages,
+        formattedMessages: messages.map(formattedChatMessage),
         targetService: "plans",
       });
       return;

@@ -150,26 +150,39 @@ local function draw()
 end
 
 local helpMessages = {
-    ".plan add <название> — добавить план",
-    ".plan list — показать список",
-    ".plan complete <id> — выполнить",
-    ".plan delete <id> — удалить",
+    ".plan add <name> - add a plan",
+    ".plan list - show all plans",
+    ".plan complete <id> - complete a plan",
+    ".plan delete <id> - delete a plan",
 }
 
 local function getChatBox()
     return peripheral.wrap(CHATBOX_NAME) or peripheral.find("chatBox")
 end
 
-local function sendChat(messages, username)
+local function sendChat(messages, username, formattedMessages)
     local chatBox = getChatBox()
     if not chatBox or type(username) ~= "string" or username == "" then return end
     if type(messages) ~= "table" then messages = { tostring(messages) } end
     for index, chatMessage in ipairs(messages) do
-        pcall(function()
-            chatBox.sendMessageToPlayer(
-                tostring(chatMessage), username, "Plans", "[]", "&b", nil, true
-            )
-        end)
+        local formatted = type(formattedMessages) == "table" and formattedMessages[index] or nil
+        local sent = false
+        if type(formatted) == "string" and type(chatBox.sendFormattedMessageToPlayer) == "function" then
+            sent = pcall(function()
+                chatBox.sendFormattedMessageToPlayer(
+                    formatted, username, "Plans", "[]", "&b"
+                )
+            end)
+        end
+        if not sent then
+            local plain = tostring(chatMessage)
+            if plain:find("[\128-\255]") then
+                plain = "Unicode message unavailable. Update Advanced Peripherals."
+            end
+            pcall(function()
+                chatBox.sendMessageToPlayer(plain, username, "Plans", "[]", "&b")
+            end)
+        end
         if index < #messages then sleep(1.1) end
     end
 end
@@ -186,7 +199,7 @@ local function handleChatCommand(username, rawMessage)
     end
     if command == "add" then
         if argument == "" then
-            sendChat({ "Использование: .plan add <название>" }, username)
+            sendChat({ "Usage: .plan add <name>" }, username)
             return
         end
         server:send({
@@ -210,7 +223,7 @@ local function handleChatCommand(username, rawMessage)
     if command == "complete" or command == "delete" then
         local planNumber = tonumber(argument:match("^#?(%d+)$"))
         if not planNumber then
-            sendChat({ ("Использование: .plan %s <id>"):format(command) }, username)
+            sendChat({ ("Usage: .plan %s <id>"):format(command) }, username)
             return
         end
         server:send({
@@ -222,7 +235,7 @@ local function handleChatCommand(username, rawMessage)
         })
         return
     end
-    sendChat({ "Неизвестная команда. Используйте .plan help" }, username)
+    sendChat({ "Unknown command. Use .plan help" }, username)
 end
 
 loadCache()
@@ -242,7 +255,11 @@ while true do
         draw()
     elseif serverEvent == "message" and type(message) == "table"
         and message.type == "plans_result" then
-        sendChat(message.messages or { "Команда выполнена" }, message.username)
+        sendChat(
+            message.messages or { "Command completed" },
+            message.username,
+            message.formattedMessages
+        )
     elseif serverEvent == "connected" or serverEvent == "disconnected" then
         draw()
     end
