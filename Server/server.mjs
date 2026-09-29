@@ -56,6 +56,7 @@ const state = {
   consoleHistory: [],
   lastCommand: null,
   plans: [],
+  planSequence: 1,
 };
 
 const clients = new Set();
@@ -115,7 +116,26 @@ function loadPlans() {
   if (!existsSync(plansFile)) return;
   try {
     const parsed = JSON.parse(readFileSync(plansFile, "utf8"));
-    if (Array.isArray(parsed)) state.plans = parsed.slice(0, 100);
+    const storedPlans = Array.isArray(parsed) ? parsed : parsed?.plans;
+    if (Array.isArray(storedPlans)) {
+      state.plans = storedPlans.slice(0, 100);
+      const used = new Set();
+      let nextNumber = 1;
+      let changed = false;
+      for (const plan of state.plans) {
+        let number = Number(plan.number);
+        if (!Number.isInteger(number) || number < 1 || used.has(number)) {
+          while (used.has(nextNumber)) nextNumber += 1;
+          number = nextNumber;
+          plan.number = number;
+          changed = true;
+        }
+        used.add(number);
+        nextNumber = Math.max(nextNumber, number + 1);
+      }
+      state.planSequence = Math.max(nextNumber, Number(parsed?.nextNumber) || 1);
+      if (changed) savePlans();
+    }
   } catch (error) {
     console.error("Cannot read plans.json:", error);
   }
@@ -123,7 +143,10 @@ function loadPlans() {
 
 function savePlans() {
   const temporaryFile = `${plansFile}.tmp`;
-  writeFileSync(temporaryFile, `${JSON.stringify(state.plans, null, 2)}\n`, "utf8");
+  writeFileSync(temporaryFile, `${JSON.stringify({
+    nextNumber: state.planSequence,
+    plans: state.plans,
+  }, null, 2)}\n`, "utf8");
   renameSync(temporaryFile, plansFile);
 }
 
@@ -150,6 +173,7 @@ function plansPayload() {
     type: "plans_update",
     plans: state.plans.map((plan) => ({
       id: plan.id,
+      number: plan.number,
       text: String(plan.englishText || "Translation pending")
         .normalize("NFKD")
         .replace(/[‘’]/g, "'")
@@ -163,10 +187,62 @@ function plansPayload() {
   };
 }
 
+function nextPlanNumber() {
+  const number = state.planSequence;
+  state.planSequence += 1;
+  return number;
+}
+
+function findPlan(identifier) {
+  const value = String(identifier || "").trim();
+  return state.plans.find((plan) => plan.id === value || String(plan.number) === value);
+}
+
+async function createPlan(russianText) {
+  const plan = {
+    id: randomUUID(),
+    number: nextPlanNumber(),
+    russianText,
+    englishText: "Translation pending",
+    translationPending: true,
+    done: false,
+    createdAt: Date.now(),
+  };
+  try {
+    plan.englishText = await translatePlan(russianText);
+    plan.translationPending = false;
+  } catch (error) {
+    console.error("Plan translation failed:", error);
+  }
+  state.plans.push(plan);
+  savePlans();
+  publishPlans();
+  return plan;
+}
+
+function setPlanCompleted(identifier, done) {
+  const plan = findPlan(identifier);
+  if (!plan) return null;
+  plan.done = done;
+  plan.completedAt = done ? Date.now() : null;
+  savePlans();
+  publishPlans();
+  return plan;
+}
+
+function removePlan(identifier) {
+  const plan = findPlan(identifier);
+  if (!plan) return null;
+  state.plans = state.plans.filter((candidate) => candidate !== plan);
+  savePlans();
+  publishPlans();
+  return plan;
+}
+
 function publishPlans() {
   const payload = plansPayload();
   sendToRole("plans", payload);
-  broadcastToBrowsers(payload);
+  broadcastToBrowsers({ type: "plans_update", plans: state.plans, updatedAt: Date.now() });
 }
 
 async function retryPendingTranslations() {
@@ -523,13 +599,72 @@ function routeConsoleCommand(browser, message) {
   }
 }
 
+function packChatLines(lines, maximumLength = 220, maximumMessages = 8) {
+  const messages = [];
+  let current = "";
+  for (const line of lines) {
+    const candidate = current ? `${current} | ${line}` : line;
+    if (candidate.length <= maximumLength) {
+      current = candidate;
+    } else {
+      if (current) messages.push(current);
+      current = line.slice(0, maximumLength);
+      if (messages.length >= maximumMessages) break;
+    }
+  }
+  if (current && messages.length < maximumMessages) messages.push(current);
+  if (messages.length >= maximumMessages && lines.length > maximumMessages) {
+    messages[maximumMessages - 1] = `${messages[maximumMessages - 1]} | Остальные планы смотрите на сайте`;
+  }
+  return messages;
+}
+
+async function handlePlansCommand(message) {
+  const action = String(message.action || "help").toLowerCase();
+  if (action === "help") {
+    return [
+      ".plan add <название> — добавить",
+      ".plan list — показать список",
+      ".plan complete <id> — выполнить",
+      ".plan delete <id> — удалить",
+    ];
+  }
+  if (action === "list") {
+    if (state.plans.length === 0) return ["Список планов пуст"];
+    const ordered = [...state.plans].sort((left, right) => Number(left.number) - Number(right.number));
+    return packChatLines(ordered.map((plan) => (
+      `#${plan.number} ${plan.done ? "[готово]" : "[в работе]"} ${plan.russianText}`
+    )));
+  }
+  if (action === "add") {
+    const text = String(message.text || "").trim();
+    if (!text || text.length > 240) return ["Название должно содержать от 1 до 240 символов"];
+    if (state.plans.length >= 100) return ["Список ограничен 100 задачами"];
+    const plan = await createPlan(text);
+    return [`Добавлен план #${plan.number}: ${plan.russianText}`];
+  }
+  if (action === "complete") {
+    const plan = setPlanCompleted(message.id, true);
+    return [plan
+      ? `План #${plan.number} отмечен выполненным: ${plan.russianText}`
+      : `План #${String(message.id || "?")} не найден`];
+  }
+  if (action === "delete") {
+    const plan = removePlan(message.id);
+    return [plan
+      ? `План #${plan.number} удалён: ${plan.russianText}`
+      : `План #${String(message.id || "?")} не найден`];
+  }
+  return ["Неизвестная команда. Используйте .plan help"];
+}
+
 websocketServer.on("connection", (socket) => {
   socket.role = "unknown";
   socket.authenticated = false;
   socket.services = new Set();
   clients.add(socket);
 
-  socket.on("message", (rawMessage) => {
+  socket.on("message", async (rawMessage) => {
     let message;
     try {
       message = JSON.parse(rawMessage.toString());
@@ -606,6 +741,24 @@ websocketServer.on("connection", (socket) => {
     }
     touchComputer(socket, effectiveRole);
     touchRoleState(socket, effectiveRole);
+
+    if (message.type === "plans_command" && effectiveRole === "plans") {
+      let messages;
+      try {
+        messages = await handlePlansCommand(message);
+      } catch (error) {
+        console.error("Chat plan command failed:", error);
+        messages = ["Не удалось выполнить команду. Попробуйте ещё раз"];
+      }
+      send(socket, {
+        type: "plans_result",
+        requestId: message.requestId || null,
+        username: String(message.username || ""),
+        messages,
+        targetService: "plans",
+      });
+      return;
+    }
 
     if (message.type === "matrix_status" && effectiveRole === "reactor") {
       state.matrix = {
@@ -1067,45 +1220,22 @@ app.post("/plans", async (request, response) => {
     return response.status(409).json({ error: "Список ограничен 100 задачами" });
   }
 
-  const plan = {
-    id: randomUUID(),
-    russianText,
-    englishText: "Translation pending",
-    translationPending: true,
-    done: false,
-    createdAt: Date.now(),
-  };
-  try {
-    plan.englishText = await translatePlan(russianText);
-    plan.translationPending = false;
-  } catch (error) {
-    console.error("Plan translation failed:", error);
-  }
-  state.plans.push(plan);
-  savePlans();
-  publishPlans();
+  const plan = await createPlan(russianText);
   return response.status(201).json({ plan });
 });
 app.patch("/plans/:id", (request, response) => {
   if (!requireToken(request, response)) return;
-  const plan = state.plans.find((candidate) => candidate.id === request.params.id);
-  if (!plan) return response.status(404).json({ error: "План не найден" });
   if (typeof request.body?.done !== "boolean") {
     return response.status(400).json({ error: "Поле done должно быть логическим" });
   }
-  plan.done = request.body.done;
-  plan.completedAt = plan.done ? Date.now() : null;
-  savePlans();
-  publishPlans();
+  const plan = setPlanCompleted(request.params.id, request.body.done);
+  if (!plan) return response.status(404).json({ error: "План не найден" });
   return response.json({ plan });
 });
 app.delete("/plans/:id", (request, response) => {
   if (!requireToken(request, response)) return;
-  const index = state.plans.findIndex((candidate) => candidate.id === request.params.id);
-  if (index < 0) return response.status(404).json({ error: "План не найден" });
-  const [plan] = state.plans.splice(index, 1);
-  savePlans();
-  publishPlans();
+  const plan = removePlan(request.params.id);
+  if (!plan) return response.status(404).json({ error: "План не найден" });
   return response.json({ plan });
 });
 app.get("/health", (_request, response) => response.json({ ok: true }));

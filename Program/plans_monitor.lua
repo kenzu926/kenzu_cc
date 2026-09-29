@@ -1,5 +1,6 @@
 -- Displays the shared web todo list on monitor_2.
 local MONITOR_NAME = "monitor_2"
+local CHATBOX_NAME = "chatBox_0"
 local REFRESH_INTERVAL = 2
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
@@ -88,7 +89,7 @@ local function sortedPlans()
     for _, plan in ipairs(plans) do result[#result + 1] = plan end
     table.sort(result, function(left, right)
         if (left.done == true) ~= (right.done == true) then return left.done ~= true end
-        return tostring(left.id or "") < tostring(right.id or "")
+        return (tonumber(left.number) or 0) < (tonumber(right.number) or 0)
     end)
     return result
 end
@@ -113,18 +114,19 @@ local function draw()
         :format(pending, #plans - pending, #plans), colors.lightGray)
 
     local y = 6
-    local availableWidth = math.max(8, width - 7)
+    local availableWidth = math.max(8, width - 13)
     for index, plan in ipairs(sortedPlans()) do
         if y > height - 2 then break end
         local done = plan.done == true
         local marker = done and "[x]" or "[ ]"
         local color = done and colors.gray or colors.white
         writeAt(monitor, 2, y, marker, done and colors.lime or colors.yellow)
+        writeAt(monitor, 6, y, ("#%s"):format(tostring(plan.number or "?")), colors.lightBlue)
         local label = plan.translationPending and "Translation pending" or plan.text
         local lines = wrap(label or "Unnamed task", availableWidth)
         for lineIndex, line in ipairs(lines) do
             if y > height - 2 then break end
-            writeAt(monitor, 7, y, line, color)
+            writeAt(monitor, 13, y, line, color)
             y = y + 1
             if lineIndex == 1 and #lines > 1 then
                 writeAt(monitor, 2, y, " |", colors.gray)
@@ -147,13 +149,89 @@ local function draw()
         server:isConnected() and colors.lime or colors.orange, colors.gray)
 end
 
+local helpMessages = {
+    ".plan add <название> — добавить план",
+    ".plan list — показать список",
+    ".plan complete <id> — выполнить",
+    ".plan delete <id> — удалить",
+}
+
+local function getChatBox()
+    return peripheral.wrap(CHATBOX_NAME) or peripheral.find("chatBox")
+end
+
+local function sendChat(messages, username)
+    local chatBox = getChatBox()
+    if not chatBox or type(username) ~= "string" or username == "" then return end
+    if type(messages) ~= "table" then messages = { tostring(messages) } end
+    for index, chatMessage in ipairs(messages) do
+        pcall(function()
+            chatBox.sendMessageToPlayer(
+                tostring(chatMessage), username, "Plans", "[]", "&b", nil, true
+            )
+        end)
+        if index < #messages then sleep(1.1) end
+    end
+end
+
+local function handleChatCommand(username, rawMessage)
+    local command, argument = tostring(rawMessage or "")
+        :match("^%$?%.plan%s*(%S*)%s*(.-)%s*$")
+    if command == nil then return end
+    command = command:lower()
+
+    if command == "" or command == "help" then
+        sendChat(helpMessages, username)
+        return
+    end
+    if command == "add" then
+        if argument == "" then
+            sendChat({ "Использование: .plan add <название>" }, username)
+            return
+        end
+        server:send({
+            type = "plans_command",
+            action = "add",
+            text = argument,
+            username = username,
+            requestId = tostring(os.epoch("utc")),
+        })
+        return
+    end
+    if command == "list" then
+        server:send({
+            type = "plans_command",
+            action = "list",
+            username = username,
+            requestId = tostring(os.epoch("utc")),
+        })
+        return
+    end
+    if command == "complete" or command == "delete" then
+        local planNumber = tonumber(argument:match("^#?(%d+)$"))
+        if not planNumber then
+            sendChat({ ("Использование: .plan %s <id>"):format(command) }, username)
+            return
+        end
+        server:send({
+            type = "plans_command",
+            action = command,
+            id = planNumber,
+            username = username,
+            requestId = tostring(os.epoch("utc")),
+        })
+        return
+    end
+    sendChat({ "Неизвестная команда. Используйте .plan help" }, username)
+end
+
 loadCache()
 server:connect()
 draw()
 local timer = os.startTimer(REFRESH_INTERVAL)
 
 while true do
-    local event, arg1, arg2, arg3 = os.pullEvent()
+    local event, arg1, arg2, arg3, arg4, arg5 = os.pullEvent()
     local serverEvent, message = server:handleEvent(event, arg1, arg2, arg3)
 
     if serverEvent == "message" and type(message) == "table"
@@ -162,6 +240,9 @@ while true do
         lastUpdate = message.updatedAt
         saveCache()
         draw()
+    elseif serverEvent == "message" and type(message) == "table"
+        and message.type == "plans_result" then
+        sendChat(message.messages or { "Команда выполнена" }, message.username)
     elseif serverEvent == "connected" or serverEvent == "disconnected" then
         draw()
     end
@@ -173,5 +254,16 @@ while true do
     elseif (event == "monitor_resize" and arg1 == MONITOR_NAME)
         or event == "peripheral" or event == "peripheral_detach" then
         draw()
+    elseif event == "chat" then
+        local username = arg1
+        local utf8Message = arg5 or arg2
+        if tostring(utf8Message or ""):match("^%$?%.plan") then
+            local subcommand = tostring(utf8Message):match("^%$?%.plan%s*(%S*)") or ""
+            if server:isConnected() or subcommand == "" or subcommand:lower() == "help" then
+                handleChatCommand(username, utf8Message)
+            else
+                sendChat({ "Сервер планов недоступен" }, username)
+            end
+        end
     end
 end

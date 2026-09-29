@@ -46,12 +46,12 @@ async function waitForServer() {
   throw new Error("Test server did not start");
 }
 
-function nextPlans(socket) {
+function nextMessage(socket, type) {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Plans update was not delivered")), 2_000);
+    const timeout = setTimeout(() => reject(new Error(`${type} was not delivered`)), 2_000);
     const listener = (raw) => {
       const message = JSON.parse(raw.toString());
-      if (message.type !== "plans_update") return;
+      if (message.type !== type) return;
       clearTimeout(timeout);
       socket.off("message", listener);
       resolve(message);
@@ -59,6 +59,8 @@ function nextPlans(socket) {
     socket.on("message", listener);
   });
 }
+
+const nextPlans = (socket) => nextMessage(socket, "plans_update");
 
 let socket;
 try {
@@ -82,6 +84,7 @@ try {
   const { plan } = await createdResponse.json();
   assert.equal(plan.russianText, "Построить вторую турбину");
   assert.equal(plan.englishText, "Build a second turbine");
+  assert.equal(plan.number, 1);
   assert.equal((await incomingCreate).plans[0].text, "Build a second turbine");
 
   const incomingComplete = nextPlans(socket);
@@ -100,6 +103,34 @@ try {
   });
   assert.equal(deleted.status, 200);
   assert.deepEqual((await incomingDelete).plans, []);
+
+  const chatUpdate = nextPlans(socket);
+  const chatResult = nextMessage(socket, "plans_result");
+  socket.send(JSON.stringify({
+    type: "plans_command",
+    action: "add",
+    text: "Построить вторую турбину",
+    username: "Kenzu",
+    requestId: "chat-add",
+  }));
+  const addedFromChat = await chatUpdate;
+  assert.equal(addedFromChat.plans[0].number, 2);
+  assert.equal(addedFromChat.plans[0].text, "Build a second turbine");
+  const addResult = await chatResult;
+  assert.equal(addResult.username, "Kenzu");
+  assert.match(addResult.messages[0], /#2/);
+
+  const completeUpdate = nextPlans(socket);
+  const completeResult = nextMessage(socket, "plans_result");
+  socket.send(JSON.stringify({
+    type: "plans_command",
+    action: "complete",
+    id: 2,
+    username: "Kenzu",
+    requestId: "chat-complete",
+  }));
+  assert.equal((await completeUpdate).plans[0].done, true);
+  assert.match((await completeResult).messages[0], /выполненным/);
   console.log("Plans translation, persistence, and monitor delivery test passed");
 } finally {
   socket?.close();
