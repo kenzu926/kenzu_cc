@@ -489,6 +489,15 @@ local function sendReactorStatus()
     local capacity = safeNumber(matrix.getMaxEnergy) / JOULES_PER_FE
     local input = safeNumber(matrix.getLastInput) / JOULES_PER_FE
     local output = safeNumber(matrix.getLastOutput) / JOULES_PER_FE
+    local statusOk, liveRunning = pcall(reactor.getStatus)
+    local statusValid = statusOk and type(liveRunning) == "boolean"
+    local burnRate = checkedNumber(reactor.getBurnRate)
+    local actualBurnRate = checkedNumber(reactor.getActualBurnRate)
+    local maxBurnRate = checkedNumber(reactor.getMaxBurnRate)
+
+    -- Never publish the cached controller state as live telemetry. The reactor
+    -- may have been stopped in its GUI between controller ticks.
+    if statusValid then reactorRunning = liveRunning end
 
     local matrixData = {
             name = MATRIX_NAME,
@@ -505,7 +514,8 @@ local function sendReactorStatus()
 
     local reactorData = {
             name = REACTOR_NAME,
-            running = reactorRunning,
+            running = statusValid and liveRunning == true,
+            statusValid = statusValid,
             startPercent = startPercent,
             stopPercent = stopPercent,
             temperature = safeNumber(reactor.getTemperature),
@@ -516,9 +526,12 @@ local function sendReactorStatus()
             wastePercent = safeNumber(reactor.getWasteFilledPercentage) * 100,
             waste = safeAmount(reactor.getWaste),
             wasteCapacity = safeNumber(reactor.getWasteCapacity),
-            burnRate = safeNumber(reactor.getBurnRate),
-            actualBurnRate = safeNumber(reactor.getActualBurnRate),
-            maxBurnRate = safeNumber(reactor.getMaxBurnRate),
+            burnRate = burnRate or 0,
+            burnRateValid = burnRate ~= nil,
+            actualBurnRate = actualBurnRate or 0,
+            actualBurnRateValid = actualBurnRate ~= nil,
+            maxBurnRate = maxBurnRate or 0,
+            maxBurnRateValid = maxBurnRate ~= nil and maxBurnRate > 0,
             fuelPercent = safeNumber(reactor.getFuelFilledPercentage) * 100,
             fuel = safeAmount(reactor.getFuel),
             fuelCapacity = safeNumber(reactor.getFuelCapacity),
@@ -709,18 +722,24 @@ local function handleServerCommand(command)
 
     if command.action == "set_burn_rate" then
         local burnRate = tonumber(command.burnRate)
-        local maxBurnRate = safeNumber(reactor.getMaxBurnRate)
-        if not burnRate or burnRate < 0 or burnRate > maxBurnRate then
-            sendCommandResult(command, false, "Burn rate must be between 0 and " .. tostring(maxBurnRate))
+        local maxBurnRate = checkedNumber(reactor.getMaxBurnRate)
+        if not maxBurnRate or maxBurnRate <= 0 then
+            sendCommandResult(command, false, "Reactor burn-rate telemetry is unavailable")
+            return
+        end
+        if not burnRate or burnRate < 0.1 or burnRate > maxBurnRate then
+            sendCommandResult(command, false, "Burn rate must be between 0.1 and " .. tostring(maxBurnRate))
             return
         end
 
         local ok, commandError = pcall(reactor.setBurnRate, burnRate)
-        if ok then
-            message = ("Burn rate set to %.2f mB/t"):format(burnRate)
+        local confirmedRate = checkedNumber(reactor.getBurnRate)
+        if ok and confirmedRate and math.abs(confirmedRate - burnRate) < 0.051 then
+            message = ("Burn rate set to %.2f mB/t"):format(confirmedRate)
             sendCommandResult(command, true, message)
         else
-            sendCommandResult(command, false, tostring(commandError))
+            sendCommandResult(command, false,
+                tostring(commandError or "Reactor did not confirm the burn rate"))
         end
         return
     end

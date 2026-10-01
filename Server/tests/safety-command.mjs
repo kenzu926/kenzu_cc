@@ -56,7 +56,20 @@ function nextMessage(socket, type) {
 }
 
 function reactorStatus(safety) {
-  return { type: "reactor_status", data: { running: true, stopPercent: safety.energyStopPercent, safety } };
+  return {
+    type: "reactor_status",
+    data: {
+      running: true,
+      statusValid: true,
+      burnRate: 4.2,
+      burnRateValid: true,
+      actualBurnRate: 4.2,
+      maxBurnRate: 32,
+      maxBurnRateValid: true,
+      stopPercent: safety.energyStopPercent,
+      safety,
+    },
+  };
 }
 
 let socket;
@@ -155,6 +168,31 @@ try {
   assert.equal(snapshot.safety.damage.enabled, true);
   assert.equal(snapshot.safety.waste.threshold, 80);
   assert.equal(snapshot.safety.waste.enabled, true);
+  assert.equal(snapshot.reactor.active, true);
+  assert.equal(snapshot.reactor.statusAvailable, true);
+  assert.equal(snapshot.reactor.burnRate, 4.2);
+  assert.equal(snapshot.reactor.burnRateAvailable, true);
+
+  socket.send(JSON.stringify({
+    type: "reactor_status",
+    data: {
+      running: true,
+      statusValid: false,
+      burnRate: 0,
+      burnRateValid: false,
+      maxBurnRate: 0,
+      maxBurnRateValid: false,
+      safety,
+    },
+  }));
+  await delay(25);
+  const unavailable = await fetch(`${base}/snapshot`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then((response) => response.json());
+  assert.equal(unavailable.reactor.active, false);
+  assert.equal(unavailable.reactor.statusAvailable, false);
+  assert.equal(unavailable.reactor.burnRate, 4.2);
+  assert.equal(unavailable.reactor.burnRateAvailable, false);
 
   const warningDelivery = nextMessage(plansSocket, "safety_chat");
   socket.send(JSON.stringify({

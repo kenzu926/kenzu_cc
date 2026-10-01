@@ -324,6 +324,13 @@ function dashboardSnapshot() {
   const safety = pendingSafety
     ? { ...(reactor.safety || {}), ...pendingSafety.values }
     : (reactor.safety || {});
+  const reactorStatusAvailable = state.reactor.online && reactor.statusValid !== false;
+  const burnRateAvailable = state.reactor.online
+    && reactor.burnRateValid !== false
+    && Number.isFinite(Number(reactor.burnRate));
+  const maxBurnRateAvailable = state.reactor.online
+    && reactor.maxBurnRateValid !== false
+    && Number(reactor.maxBurnRate) > 0;
 
   return {
     online: {
@@ -333,7 +340,8 @@ function dashboardSnapshot() {
       storage: state.storage.online && state.storage.connected,
     },
     reactor: {
-      active: Boolean(reactor.running),
+      active: reactorStatusAvailable && reactor.running === true,
+      statusAvailable: reactorStatusAvailable,
       water: numeric(reactor.coolantPercent),
       fuel: numeric(reactor.fuelPercent),
       heated: numeric(reactor.heatedCoolantPercent),
@@ -341,9 +349,13 @@ function dashboardSnapshot() {
       heating: numeric(reactor.heatingRate),
       temperature: numeric(reactor.temperature),
       damage: numeric(reactor.damage),
-      burnRate: numeric(reactor.burnRate),
+      burnRate: burnRateAvailable
+        ? numeric(reactor.burnRate)
+        : Math.max(0.1, numeric(reactor.burnRate)),
+      burnRateAvailable,
       actualBurnRate: numeric(reactor.actualBurnRate),
-      maxBurnRate: Math.max(0.1, numeric(reactor.maxBurnRate, 100)),
+      maxBurnRate: maxBurnRateAvailable ? numeric(reactor.maxBurnRate) : 0.1,
+      maxBurnRateAvailable,
     },
     matrix: {
       energy: numeric(matrix.storedEnergy) / 1e12,
@@ -487,7 +499,7 @@ function validateCommand(message) {
   if (!allowed.has(message.action)) return "Unknown command";
   if (message.action === "set_burn_rate") {
     const burnRate = Number(message.burnRate);
-    if (!Number.isFinite(burnRate) || burnRate < 0 || burnRate > 1_000_000) {
+    if (!Number.isFinite(burnRate) || burnRate < 0.1 || burnRate > 1_000_000) {
       return "Burn rate must be a positive number";
     }
     return null;
@@ -866,13 +878,24 @@ websocketServer.on("connection", (socket) => {
     }
 
     if (message.type === "reactor_status" && effectiveRole === "reactor") {
+      const previous = state.reactor.data || {};
+      const incoming = message.data && typeof message.data === "object" ? message.data : {};
+      const reactorData = { ...incoming };
+      if (incoming.burnRateValid === false && previous.burnRateValid !== false
+        && Number.isFinite(Number(previous.burnRate))) {
+        reactorData.burnRate = previous.burnRate;
+      }
+      if (incoming.maxBurnRateValid === false && previous.maxBurnRateValid !== false
+        && Number(previous.maxBurnRate) > 0) {
+        reactorData.maxBurnRate = previous.maxBurnRate;
+      }
       state.reactor = {
         online: true,
         lastSeen: Date.now(),
         computerId: socket.computerId,
-        data: message.data,
+        data: reactorData,
       };
-      if (pendingSafety && safetyMatches(message.data?.safety, pendingSafety.values)) {
+      if (pendingSafety && safetyMatches(reactorData.safety, pendingSafety.values)) {
         pendingSafety = null;
       }
       broadcastToBrowsers({ type: "reactor_state", reactor: state.reactor });
