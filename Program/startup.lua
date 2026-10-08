@@ -44,6 +44,11 @@ end
 
 local PROGRAMS = {
     {
+        path = "leaderboards.lua",
+        title = "Leaderboards",
+        shouldRun = function() return type(kenzu) == "table" end,
+    },
+    {
         path = "gateway.lua",
         title = "Gateway",
         shouldRun = function() return true end,

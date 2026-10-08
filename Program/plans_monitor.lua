@@ -1,15 +1,72 @@
--- Displays the shared web todo list on monitor_2.
+-- Touch pages for shared plans and locally read player leaderboards on monitor_2.
 local MONITOR_NAME = "monitor_2"
 local CHATBOX_NAME = "chatBox_0"
 local REFRESH_INTERVAL = 2
+local LEADERBOARD_INTERVAL = 30
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local cacheFile = fs.combine(scriptDirectory, "plans.cache")
+local leaderboardCacheFile = fs.combine(scriptDirectory, "leaderboards.cache")
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local server = GatewayClient.new("plans")
 
 local plans = {}
 local lastUpdate = nil
+local page = "plans"
+local buttons = {}
+local leaderboardIndex = 1
+local leaderboardPage = 1
+local leaderboardPages = 1
+local leaderboardData = nil
+local leaderboardAvailable = false
+local leaderboardError = "Waiting for server statistics"
+local leaderboardTypes = {
+    { id = "time_played", label = "TIME PLAYED" },
+    { id = "damage_dealt", label = "DAMAGE DEALT" },
+    { id = "deaths", label = "DEATHS" },
+    { id = "deaths_per_hour", label = "DEATHS PER HOUR" },
+    { id = "distance_walked", label = "DISTANCE WALKED" },
+    { id = "jumps", label = "JUMPS" },
+    { id = "mob_kills", label = "MOB KILLS" },
+    { id = "player_kills", label = "PLAYER KILLS" },
+    { id = "time_since_death", label = "TIME SINCE DEATH" },
+}
+
+local function loadLeaderboardCache()
+    if not fs.exists(leaderboardCacheFile) then return end
+    local handle = fs.open(leaderboardCacheFile, "r")
+    if not handle then return end
+    local ok, decoded = pcall(textutils.unserializeJSON, handle.readAll())
+    handle.close()
+    if ok and type(decoded) == "table" and type(decoded.boards) == "table" then
+        leaderboardData = decoded
+    end
+end
+
+local function refreshLeaderboards()
+    if type(kenzu) ~= "table" or type(kenzu.getLeaderboards) ~= "function" then
+        leaderboardAvailable = false
+        leaderboardError = "Requires Kenzu CC Bridge 1.3.0"
+        return
+    end
+    local ok, result = pcall(kenzu.getLeaderboards)
+    if not ok or type(result) ~= "table" or type(result.boards) ~= "table" then
+        leaderboardAvailable = false
+        leaderboardError = "Statistics unavailable - retrying"
+        return
+    end
+    local changed = not leaderboardData or leaderboardData.generatedAt ~= result.generatedAt
+    leaderboardData = result
+    leaderboardAvailable = true
+    leaderboardError = nil
+    if changed then
+        local handle = fs.open(leaderboardCacheFile, "w")
+        if handle then
+            handle.write(textutils.serializeJSON(result))
+            handle.close()
+        end
+    end
+end
 
 local function loadCache()
     if not fs.exists(cacheFile) then return end
@@ -46,7 +103,8 @@ local function writeAt(monitor, x, y, value, foreground, background)
 end
 
 local function fill(monitor, y, color)
-    local width = monitor.getSize()
+    local width, height = monitor.getSize()
+    if y < 1 or y > height then return end
     monitor.setCursorPos(1, y)
     monitor.setBackgroundColor(color)
     monitor.write(string.rep(" ", width))
@@ -141,7 +199,7 @@ local function drawPlanColumn(monitor, columnPlans, x, width, firstRow, lastRow,
     end
 end
 
-local function draw()
+local function drawPlans()
     local monitor = getMonitor()
     if not monitor then return end
     local width, height = monitor.getSize()
@@ -168,7 +226,7 @@ local function draw()
     fill(monitor, 5, colors.gray)
     writeInColumn(monitor, leftX, 5, "OPEN PLANS", leftWidth, colors.yellow, colors.gray)
     writeInColumn(monitor, rightX, 5, "COMPLETED", rightWidth, colors.lime, colors.gray)
-    for y = 4, height - 1 do
+    for y = 5, height - 1 do
         writeAt(monitor, divider, y, "|", colors.gray, colors.black)
     end
 
@@ -179,6 +237,113 @@ local function draw()
     writeAt(monitor, 2, height,
         server:isConnected() and "WEB LINK ONLINE" or "CACHED / OFFLINE",
         server:isConnected() and colors.lime or colors.orange, colors.gray)
+end
+
+local function button(monitor, x, y, width, label, action, selected, enabled)
+    local background = selected and colors.blue or colors.gray
+    local foreground = enabled == false and colors.lightGray or colors.white
+    local text = tostring(label):sub(1, width)
+    local padding = math.max(0, math.floor((width - #text) / 2))
+    writeAt(monitor, x, y, string.rep(" ", width), foreground, background)
+    writeInColumn(monitor, x + padding, y, text, width - padding, foreground, background)
+    if enabled ~= false then
+        buttons[#buttons + 1] = { x = x, y = y, width = width, action = action }
+    end
+end
+
+local function changeLeaderboard(direction)
+    leaderboardIndex = ((leaderboardIndex - 1 + direction) % #leaderboardTypes) + 1
+    leaderboardPage = 1
+end
+
+local function drawLeaderboards()
+    local monitor = getMonitor()
+    if not monitor then return end
+    local width, height = monitor.getSize()
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    local selected = leaderboardTypes[leaderboardIndex]
+    local entries = leaderboardData and leaderboardData.boards[selected.id] or {}
+    if type(entries) ~= "table" then entries = {} end
+    local perPage = math.max(1, height - 9)
+    leaderboardPages = math.max(1, math.ceil(#entries / perPage))
+    leaderboardPage = math.max(1, math.min(leaderboardPage, leaderboardPages))
+
+    for y = 1, 3 do fill(monitor, y, colors.gray) end
+    centered(monitor, 1, "PLAYER LEADERBOARDS", colors.cyan, colors.gray)
+    centered(monitor, 2, "Touch arrows to select a leaderboard", colors.white, colors.gray)
+    centered(monitor, 3, ("TOP %d / %d   -   %d PLAYERS")
+        :format(leaderboardIndex, #leaderboardTypes, #entries), colors.lightGray, colors.gray)
+
+    button(monitor, 1, 5, 10, "< PREV TOP", function() changeLeaderboard(-1) end)
+    centered(monitor, 5, selected.label, colors.yellow)
+    button(monitor, width - 9, 5, 10, "NEXT TOP >", function() changeLeaderboard(1) end)
+    local valueWidth = math.min(18, math.floor(width / 3))
+    local valueX = width - valueWidth
+    local nameWidth = valueX - 10
+    writeAt(monitor, 2, 6, "RANK", colors.gray)
+    writeAt(monitor, 9, 6, "PLAYER", colors.gray)
+    writeAt(monitor, valueX, 6, "VALUE", colors.gray)
+    local first = (leaderboardPage - 1) * perPage + 1
+    for index = first, math.min(#entries, first + perPage - 1) do
+        local entry = entries[index]
+        local y = 7 + index - first
+        local rank = tonumber(entry.rank) or index
+        local rankColor = rank == 1 and colors.yellow
+            or rank == 2 and colors.lightGray or rank == 3 and colors.orange or colors.gray
+        writeInColumn(monitor, 2, y, ("#%02d"):format(rank), 6, rankColor)
+        writeInColumn(monitor, 9, y, entry.name or entry.uuid or "Unknown", nameWidth,
+            leaderboardAvailable and entry.online and colors.lime or colors.white)
+        writeInColumn(monitor, valueX, y, entry.display or tostring(entry.value or 0),
+            valueWidth, colors.lightBlue)
+    end
+    if #entries == 0 then
+        centered(monitor, 8, leaderboardData and "No non-zero values yet" or "Waiting for statistics", colors.gray)
+    end
+    centered(monitor, height - 2,
+        leaderboardAvailable and "Green name = online"
+            or leaderboardData and "Cached values - not live" or "No statistics received", colors.gray)
+    fill(monitor, height - 1, colors.gray)
+    centered(monitor, height - 1, ("PAGE %d / %d"):format(leaderboardPage, leaderboardPages), colors.white, colors.gray)
+    button(monitor, 1, height - 1, 10, "< PREV", function()
+        leaderboardPage = leaderboardPage - 1
+    end, false, leaderboardPage > 1)
+    button(monitor, width - 9, height - 1, 10, "NEXT >", function()
+        leaderboardPage = leaderboardPage + 1
+    end, false, leaderboardPage < leaderboardPages)
+    fill(monitor, height, colors.gray)
+    writeAt(monitor, 2, height, leaderboardAvailable and "LOCAL STATS ONLINE - REFRESH 30s"
+        or leaderboardError or "CACHED / OFFLINE",
+        leaderboardAvailable and colors.lime or colors.orange, colors.gray)
+end
+
+local function draw()
+    buttons = {}
+    local monitor = getMonitor()
+    if not monitor then return end
+    local width, height = monitor.getSize()
+    if width < 44 or height < 12 then
+        monitor.setBackgroundColor(colors.black)
+        monitor.clear()
+        writeAt(monitor, 1, 1, "Please enlarge monitor_2", colors.orange)
+        writeAt(monitor, 1, 2, "Minimum: 44 x 12 characters", colors.gray)
+        return
+    end
+    if page == "plans" then drawPlans() else drawLeaderboards() end
+    local half = math.floor(width / 2)
+    button(monitor, 1, 4, half, "PLANS", function() page = "plans" end, page == "plans")
+    button(monitor, half + 1, 4, width - half, "LEADERBOARD", function() page = "leaderboards" end,
+        page == "leaderboards")
+end
+
+local function handleTouch(x, y)
+    for _, control in ipairs(buttons) do
+        if y == control.y and x >= control.x and x < control.x + control.width then
+            control.action()
+            draw()
+            return
+        end
+    end
 end
 
 local helpMessages = {
@@ -336,10 +501,13 @@ local function pollUnicodeChat()
 end
 
 loadCache()
+loadLeaderboardCache()
+refreshLeaderboards()
 server:connect()
 pollUnicodeChat()
 draw()
 local timer = os.startTimer(REFRESH_INTERVAL)
+local leaderboardTimer = os.startTimer(LEADERBOARD_INTERVAL)
 
 while true do
     local event, arg1, arg2, arg3, arg4, arg5 = os.pullEvent()
@@ -369,7 +537,13 @@ while true do
         draw()
     end
 
-    if event == "timer" and arg1 == timer then
+    if event == "monitor_touch" and arg1 == MONITOR_NAME then
+        handleTouch(arg2, arg3)
+    elseif event == "timer" and arg1 == leaderboardTimer then
+        refreshLeaderboards()
+        draw()
+        leaderboardTimer = os.startTimer(LEADERBOARD_INTERVAL)
+    elseif event == "timer" and arg1 == timer then
         server:connect()
         pollUnicodeChat()
         draw()

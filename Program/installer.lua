@@ -24,6 +24,7 @@ local FILES = {
     "plans_monitor.lua",
     "overview_relay.lua",
     "player_presence.lua",
+    "leaderboards.lua",
     "service_runner.lua",
 }
 
