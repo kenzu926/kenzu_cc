@@ -14,7 +14,6 @@ local plans = {}
 local lastUpdate = nil
 local page = "plans"
 local buttons = {}
-local leaderboardIndex = 1
 local leaderboardPage = 1
 local leaderboardPages = 1
 local leaderboardData = nil
@@ -213,29 +212,27 @@ local function drawPlans()
 
     fill(monitor, 1, colors.gray)
     fill(monitor, 2, colors.gray)
-    fill(monitor, 3, colors.gray)
     centered(monitor, 1, "BASE PLANS", colors.cyan, colors.gray)
-    centered(monitor, 2, ".plan help - for help", colors.white, colors.gray)
-    centered(monitor, 3, ("OPEN %d   DONE %d   TOTAL %d")
+    centered(monitor, 2, ("OPEN %d   DONE %d   TOTAL %d")
         :format(pending, #plans - pending, #plans), colors.lightGray, colors.gray)
 
     local divider = math.floor(width / 2) + 1
     local leftX, rightX = 2, divider + 2
     local leftWidth = math.max(10, divider - leftX - 1)
     local rightWidth = math.max(10, width - rightX)
-    fill(monitor, 5, colors.gray)
-    writeInColumn(monitor, leftX, 5, "OPEN PLANS", leftWidth, colors.yellow, colors.gray)
-    writeInColumn(monitor, rightX, 5, "COMPLETED", rightWidth, colors.lime, colors.gray)
-    for y = 5, height - 1 do
+    fill(monitor, 6, colors.gray)
+    writeInColumn(monitor, leftX, 6, "OPEN PLANS", leftWidth, colors.yellow, colors.gray)
+    writeInColumn(monitor, rightX, 6, "COMPLETED", rightWidth, colors.lime, colors.gray)
+    for y = 6, height - 1 do
         writeAt(monitor, divider, y, "|", colors.gray, colors.black)
     end
 
-    drawPlanColumn(monitor, plansByState(false), leftX, leftWidth, 7, height - 2, false)
-    drawPlanColumn(monitor, plansByState(true), rightX, rightWidth, 7, height - 2, true)
+    drawPlanColumn(monitor, plansByState(false), leftX, leftWidth, 8, height - 2, false)
+    drawPlanColumn(monitor, plansByState(true), rightX, rightWidth, 8, height - 2, true)
 
     fill(monitor, height, colors.gray)
     writeAt(monitor, 2, height,
-        server:isConnected() and "WEB LINK ONLINE" or "CACHED / OFFLINE",
+        (server:isConnected() and "WEB LINK ONLINE" or "CACHED / OFFLINE") .. " | .plan help",
         server:isConnected() and colors.lime or colors.orange, colors.gray)
 end
 
@@ -251,70 +248,67 @@ local function button(monitor, x, y, width, label, action, selected, enabled)
     end
 end
 
-local function changeLeaderboard(direction)
-    leaderboardIndex = ((leaderboardIndex - 1 + direction) % #leaderboardTypes) + 1
-    leaderboardPage = 1
-end
-
 local function drawLeaderboards()
     local monitor = getMonitor()
     if not monitor then return end
     local width, height = monitor.getSize()
     monitor.setBackgroundColor(colors.black)
     monitor.clear()
-    local selected = leaderboardTypes[leaderboardIndex]
-    local entries = leaderboardData and leaderboardData.boards[selected.id] or {}
-    if type(entries) ~= "table" then entries = {} end
-    local perPage = math.max(1, height - 9)
-    leaderboardPages = math.max(1, math.ceil(#entries / perPage))
+    centered(monitor, 1, "PLAYER LEADERBOARDS", colors.cyan)
+    centered(monitor, 2, "TOP 3 PLAYERS  |  ALL SERVER RANKINGS", colors.lightGray)
+
+    -- Each card contains one heading and three player rows, separated by two
+    -- empty rows from the next card. Never stretch a three-player list vertically.
+    local columns = math.max(1, math.min(3, math.floor(width / 32)))
+    local rows = math.max(1, math.floor((height - 8) / 6))
+    local perPage = math.min(#leaderboardTypes, columns * rows)
+    leaderboardPages = math.max(1, math.ceil(#leaderboardTypes / perPage))
     leaderboardPage = math.max(1, math.min(leaderboardPage, leaderboardPages))
-
-    for y = 1, 3 do fill(monitor, y, colors.gray) end
-    centered(monitor, 1, "PLAYER LEADERBOARDS", colors.cyan, colors.gray)
-    centered(monitor, 2, "Touch arrows to select a leaderboard", colors.white, colors.gray)
-    centered(monitor, 3, ("TOP %d / %d   -   %d PLAYERS")
-        :format(leaderboardIndex, #leaderboardTypes, #entries), colors.lightGray, colors.gray)
-
-    button(monitor, 1, 5, 10, "< PREV TOP", function() changeLeaderboard(-1) end)
-    centered(monitor, 5, selected.label, colors.yellow)
-    button(monitor, width - 9, 5, 10, "NEXT TOP >", function() changeLeaderboard(1) end)
-    local valueWidth = math.min(18, math.floor(width / 3))
-    local valueX = width - valueWidth
-    local nameWidth = valueX - 10
-    writeAt(monitor, 2, 6, "RANK", colors.gray)
-    writeAt(monitor, 9, 6, "PLAYER", colors.gray)
-    writeAt(monitor, valueX, 6, "VALUE", colors.gray)
+    local cardWidth = math.min(42, math.floor((width - 4 - (columns - 1) * 2) / columns))
+    local gridWidth = columns * cardWidth + (columns - 1) * 2
+    local gridX = math.floor((width - gridWidth) / 2) + 1
     local first = (leaderboardPage - 1) * perPage + 1
-    for index = first, math.min(#entries, first + perPage - 1) do
-        local entry = entries[index]
-        local y = 7 + index - first
-        local rank = tonumber(entry.rank) or index
-        local rankColor = rank == 1 and colors.yellow
-            or rank == 2 and colors.lightGray or rank == 3 and colors.orange or colors.gray
-        writeInColumn(monitor, 2, y, ("#%02d"):format(rank), 6, rankColor)
-        writeInColumn(monitor, 9, y, entry.name or entry.uuid or "Unknown", nameWidth,
-            leaderboardAvailable and entry.online and colors.lime or colors.white)
-        writeInColumn(monitor, valueX, y, entry.display or tostring(entry.value or 0),
-            valueWidth, colors.lightBlue)
+    local last = math.min(#leaderboardTypes, first + perPage - 1)
+    for index = first, last do
+        local offset = index - first
+        local x = gridX + (offset % columns) * (cardWidth + 2)
+        local y = 7 + math.floor(offset / columns) * 6
+        local definition = leaderboardTypes[index]
+        local entries = leaderboardData and leaderboardData.boards[definition.id] or {}
+        if type(entries) ~= "table" then entries = {} end
+        writeInColumn(monitor, x, y, string.rep(" ", cardWidth), cardWidth, colors.white, colors.gray)
+        writeInColumn(monitor, x + 1, y, definition.label, cardWidth - 2, colors.cyan, colors.gray)
+        local valueWidth = math.min(12, math.floor(cardWidth / 3))
+        local nameWidth = cardWidth - valueWidth - 5
+        for rank = 1, math.min(3, #entries) do
+            local entry = entries[rank]
+            local rankColor = rank == 1 and colors.yellow or rank == 2 and colors.lightGray or colors.orange
+            writeInColumn(monitor, x, y + rank, "#" .. rank, 3, rankColor)
+            writeInColumn(monitor, x + 3, y + rank, entry.name or entry.uuid or "Unknown", nameWidth,
+                leaderboardAvailable and entry.online and colors.lime or colors.white)
+            local value = tostring(entry.display or entry.value or 0):sub(1, valueWidth)
+            writeInColumn(monitor, x + cardWidth - #value, y + rank, value, valueWidth, colors.lightBlue)
+        end
+        if #entries == 0 then
+            writeInColumn(monitor, x + 1, y + 2, leaderboardData and "No non-zero values" or "Waiting for statistics",
+                cardWidth - 2, colors.gray)
+        end
     end
-    if #entries == 0 then
-        centered(monitor, 8, leaderboardData and "No non-zero values yet" or "Waiting for statistics", colors.gray)
+
+    local bottom = 7 + math.ceil((last - first + 1) / columns) * 6
+    if leaderboardPages > 1 then
+        button(monitor, gridX, bottom - 1, 10, "< PREV", function()
+            leaderboardPage = leaderboardPage - 1
+        end, false, leaderboardPage > 1)
+        centered(monitor, bottom - 1, ("TOPS %d / %d"):format(leaderboardPage, leaderboardPages), colors.lightGray)
+        button(monitor, gridX + gridWidth - 10, bottom - 1, 10, "NEXT >", function()
+            leaderboardPage = leaderboardPage + 1
+        end, false, leaderboardPage < leaderboardPages)
     end
-    centered(monitor, height - 2,
-        leaderboardAvailable and "Green name = online"
-            or leaderboardData and "Cached values - not live" or "No statistics received", colors.gray)
-    fill(monitor, height - 1, colors.gray)
-    centered(monitor, height - 1, ("PAGE %d / %d"):format(leaderboardPage, leaderboardPages), colors.white, colors.gray)
-    button(monitor, 1, height - 1, 10, "< PREV", function()
-        leaderboardPage = leaderboardPage - 1
-    end, false, leaderboardPage > 1)
-    button(monitor, width - 9, height - 1, 10, "NEXT >", function()
-        leaderboardPage = leaderboardPage + 1
-    end, false, leaderboardPage < leaderboardPages)
-    fill(monitor, height, colors.gray)
-    writeAt(monitor, 2, height, leaderboardAvailable and "LOCAL STATS ONLINE - REFRESH 30s"
-        or leaderboardError or "CACHED / OFFLINE",
-        leaderboardAvailable and colors.lime or colors.orange, colors.gray)
+    centered(monitor, bottom, leaderboardAvailable and "LOCAL STATS ONLINE - REFRESH 30s"
+        or leaderboardError or "CACHED / OFFLINE", leaderboardAvailable and colors.lime or colors.orange)
+    centered(monitor, bottom + 1, leaderboardAvailable and "Green name = online"
+        or leaderboardData and "Cached values - not live" or "No statistics received", colors.gray)
 end
 
 local function draw()
@@ -322,17 +316,18 @@ local function draw()
     local monitor = getMonitor()
     if not monitor then return end
     local width, height = monitor.getSize()
-    if width < 44 or height < 12 then
+    if width < 44 or height < 15 then
         monitor.setBackgroundColor(colors.black)
         monitor.clear()
         writeAt(monitor, 1, 1, "Please enlarge monitor_2", colors.orange)
-        writeAt(monitor, 1, 2, "Minimum: 44 x 12 characters", colors.gray)
+        writeAt(monitor, 1, 2, "Minimum: 44 x 15 characters", colors.gray)
         return
     end
     if page == "plans" then drawPlans() else drawLeaderboards() end
-    local half = math.floor(width / 2)
-    button(monitor, 1, 4, half, "PLANS", function() page = "plans" end, page == "plans")
-    button(monitor, half + 1, 4, width - half, "LEADERBOARD", function() page = "leaderboards" end,
+    local tabWidth, gap = 16, 3
+    local tabX = math.floor((width - tabWidth * 2 - gap) / 2) + 1
+    button(monitor, tabX, 4, tabWidth, "PLANS", function() page = "plans" end, page == "plans")
+    button(monitor, tabX + tabWidth + gap, 4, tabWidth, "LEADERBOARD", function() page = "leaderboards" end,
         page == "leaderboards")
 end
 
