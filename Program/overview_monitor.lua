@@ -529,7 +529,7 @@ local function meter(y, label, percent, color, rows)
     rows = rows or 2
     text(3, y, label, colors.lightGray)
     text(math.max(3, width - 8), y, ("%6.1f%%"):format(tonumber(percent) or 0), colors.white)
-    bar(3, y + 1, math.max(8, width - 6), percent, color, rows)
+    bar(2, y + 1, math.max(8, width - 2), percent, color, rows)
 end
 
 local function button(x, y, width, label, action, selected, enabled)
@@ -643,10 +643,13 @@ local function meSnapshot()
 end
 
 local function cellTypeLabel(rawType)
-    local key = tostring(rawType or "item"):lower()
-    if key == "item" then return "ITEMS" end
-    if key == "fluid" then return "FLUIDS" end
-    return tostring(rawType or "item"):upper()
+    local s = tostring(rawType or "item")
+    local lower = s:lower()
+    if lower == "item" then return "ITEMS" end
+    if lower == "fluid" then return "FLUIDS" end
+    -- "modid:chemical" -> "CHEMICAL", unknown stays readable.
+    local short = s:match("([^:/]+)$") or s
+    return short:upper()
 end
 
 -- --------------------------------------------------------------------------
@@ -711,7 +714,7 @@ local function drawEnergyTab(y1, y2, width)
             local color = colors.lime
             if stale then color = colors.orange
             elseif (tonumber(entry.percent) or 0) >= 95 then color = colors.orange end
-            bar(2, r + 2, math.max(8, width - 4), entry.percent, color, 1)
+            bar(2, r + 2, math.max(8, width - 2), entry.percent, color, 1)
         end
     end
     if pages > 1 then
@@ -914,56 +917,25 @@ local function drawMETab(y1, y2, width)
     text(2, y, ("ME %s  CELLS %d"):format(connectedText, #cells),
         metrics.connected and colors.lime or colors.red)
     y = y + 1
-    for _, group in ipairs(order) do
-        if y + 2 <= y2 - 8 then
-            local groupPercent = group.total > 0 and group.used / group.total * 100 or 0
-            text(2, y, ("%s x%d  %s/%s"):format(group.label, group.count,
-                shorten(group.used), shorten(group.total)):sub(1, width - 10), colors.cyan)
-            text(math.max(2, width - 7), y, ("%5.1f%%"):format(groupPercent), colors.white)
-            bar(2, y + 1, math.max(8, width - 4), groupPercent, colors.cyan, 1)
-            y = y + 3
-        end
-    end
-    -- Top cells by usedBytes.
-    local ranked = {}
-    for _, cell in ipairs(cells) do
-        if tonumber(cell.usedBytes) ~= nil then ranked[#ranked + 1] = cell end
-    end
-    table.sort(ranked, function(a, b)
-        return (tonumber(a.usedBytes) or 0) > (tonumber(b.usedBytes) or 0)
-    end)
-    local perTop = 5
-    local topPages = math.max(1, math.ceil(math.max(1, #ranked) / perTop))
-    if #ranked == 0 then topPages = 1 end
-    cellPage = math.max(1, math.min(cellPage, topPages))
-    if y <= y2 - 3 then
-        text(2, y, "TOP CELLS", colors.yellow)
+    -- One fill bar per connected storage category (items, fluids, chemicals,
+    -- mana, ...). Categories are built from actually present cells, so a
+    -- missing category simply has no bar. Two rows per category.
+    local stale = source == "STALE" or source == "OFFLINE"
+    if #order == 0 then
+        text(2, y, total > 0 and "cells unavailable - aggregate only" or "NO CELL DATA", colors.orange)
         y = y + 1
     end
-    if #ranked == 0 then
-        if y <= y2 - 2 then
-            text(2, y, total > 0 and "cells unavailable - aggregate only" or "NO CELL DATA", colors.orange)
-            y = y + 1
-        end
-    else
-        local first = (cellPage - 1) * perTop + 1
-        local last = math.min(#ranked, first + perTop - 1)
-        for index = first, last do
-            if y <= y2 - 2 then
-                local cell = ranked[index]
-                local cellTotal = tonumber(cell.totalBytes) or 0
-                local cellUsed = tonumber(cell.usedBytes) or 0
-                local cellPercent = cellTotal > 0 and cellUsed / cellTotal * 100 or 0
-                text(2, y, tostring(cell.item or ("CELL " .. index)):sub(1, math.max(10, width - 10)), colors.white)
-                text(math.max(2, width - 7), y, ("%5.1f%%"):format(cellPercent), colors.lightGray)
-                y = y + 1
-            end
-        end
-        if topPages > 1 and y <= y2 - 2 then
-            drawPaging(y, cellPage, topPages, function() cellPage = cellPage - 1 end,
-                function() cellPage = cellPage + 1 end, width)
-            y = y + 1
-        end
+    for _, group in ipairs(order) do
+        if y + 1 > y2 - 2 then break end
+        local groupPercent = group.total > 0 and group.used / group.total * 100 or 0
+        text(2, y, ("%s x%d  %s/%s"):format(group.label, group.count,
+            shorten(group.used), shorten(group.total)):sub(1, width - 10), colors.cyan)
+        text(math.max(2, width - 7), y, ("%5.1f%%"):format(groupPercent), colors.white)
+        local barColor = colors.lime
+        if stale then barColor = colors.orange
+        elseif groupPercent >= 95 then barColor = colors.orange end
+        bar(2, y + 1, math.max(8, width - 2), groupPercent, barColor, 1)
+        y = y + 2
     end
     local cellSource = metrics.cellSource
     if y <= y2 then
