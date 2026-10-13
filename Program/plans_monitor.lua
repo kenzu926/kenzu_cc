@@ -8,7 +8,10 @@ local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local cacheFile = fs.combine(scriptDirectory, "plans.cache")
 local leaderboardCacheFile = fs.combine(scriptDirectory, "leaderboards.cache")
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
+local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
 local server = GatewayClient.new("plans")
+MONITOR_NAME = Peripherals.get("plansMonitor")
+CHATBOX_NAME = Peripherals.get("chatBox")
 
 local plans = {}
 local lastUpdate = nil
@@ -87,7 +90,7 @@ local function saveCache()
 end
 
 local function getMonitor()
-    local monitor = peripheral.wrap(MONITOR_NAME)
+    local monitor = peripheral.wrap(MONITOR_NAME) or Peripherals.wrap("plansMonitor")
     if monitor then monitor.setTextScale(0.5) end
     return monitor
 end
@@ -349,7 +352,9 @@ local helpMessages = {
 }
 
 local function getChatBox()
-    return peripheral.wrap(CHATBOX_NAME) or peripheral.find("chatBox")
+    return peripheral.wrap(CHATBOX_NAME)
+        or Peripherals.wrap("chatBox")
+        or peripheral.find("chatBox")
 end
 
 local function toCodepoints(value)
@@ -515,6 +520,12 @@ while true do
         saveCache()
         draw()
     elseif serverEvent == "message" and type(message) == "table"
+        and message.type == "peripherals_update" then
+        Peripherals.applyRemote(message.peripherals)
+        MONITOR_NAME = Peripherals.get("plansMonitor")
+        CHATBOX_NAME = Peripherals.get("chatBox")
+        draw()
+    elseif serverEvent == "message" and type(message) == "table"
         and message.type == "plans_result" then
         sendChat(
             message.messages or { "Command completed" },
@@ -532,7 +543,7 @@ while true do
         draw()
     end
 
-    if event == "monitor_touch" and arg1 == MONITOR_NAME then
+    if event == "monitor_touch" then
         handleTouch(arg2, arg3)
     elseif event == "timer" and arg1 == leaderboardTimer then
         refreshLeaderboards()
@@ -543,8 +554,11 @@ while true do
         pollUnicodeChat()
         draw()
         timer = os.startTimer(REFRESH_INTERVAL)
-    elseif (event == "monitor_resize" and arg1 == MONITOR_NAME)
+    elseif (event == "monitor_resize")
+        or event == Peripherals.RELOAD_EVENT
         or event == "peripheral" or event == "peripheral_detach" then
+        MONITOR_NAME = Peripherals.get("plansMonitor")
+        CHATBOX_NAME = Peripherals.get("chatBox")
         draw()
     elseif event == "chat" and not hasUnicodeChatBridge() then
         local username = arg1

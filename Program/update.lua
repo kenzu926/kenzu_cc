@@ -76,19 +76,19 @@ end
 
 if not isRemoteRequest then
     local modemCount = openWirelessModems()
-    if modemCount > 0 and serverToken ~= "" then
+    if modemCount > 0 then
+        -- Never broadcast the WS token: receivers reuse their own local copy.
+        -- This only triggers a refresh, it does not authenticate the sender
+        -- (see update_agent.lua throttling). Token stays on disk only.
         rednet.broadcast({
             action = "update",
             requestId = requestId,
-            token = serverToken,
             senderId = os.getComputerID(),
         }, UPDATE_PROTOCOL)
         print("Update request sent to the other computers.")
         sleep(0.5)
-    elseif modemCount == 0 then
-        print("Wireless modem not found; updating only this computer.")
     else
-        print("Server token is empty; updating only this computer.")
+        print("Wireless modem not found; updating only this computer.")
     end
 else
     print("Remote update request accepted.")

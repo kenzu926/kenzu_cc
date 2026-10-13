@@ -2,6 +2,10 @@
 -- This runs in its own multishell tab, so reactor automation remains isolated.
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
+local Peripherals
+if fs.exists(fs.combine(scriptDirectory, "peripherals.lua")) then
+    Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
+end
 local server = WebSocketClient.new("terminal")
 local TERMINAL_FRAME_PROTOCOL = "kenzu_cc.terminal.frame"
 local TERMINAL_INPUT_PROTOCOL = "kenzu_cc.terminal.input"
@@ -173,9 +177,12 @@ while true do
     if serverEvent == "connected" then
         lastFrameSignature = nil
         sendFrame(true)
-    elseif serverEvent == "message" and type(serverMessage) == "table"
-        and serverMessage.type == "terminal_input" then
-        handleRemoteInput(serverMessage)
+    elseif serverEvent == "message" and type(serverMessage) == "table" then
+        if serverMessage.type == "terminal_input" then
+            handleRemoteInput(serverMessage)
+        elseif serverMessage.type == "peripherals_update" and Peripherals then
+            Peripherals.applyRemote(serverMessage.peripherals)
+        end
     end
 
     if event[1] == "timer" and event[2] == frameTimer then

@@ -11,6 +11,7 @@ local STORAGE_CHUNK_SIZE = 100
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
+local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
 local server = WebSocketClient.new("storage_node")
 
 local function findWirelessModem()
@@ -25,30 +26,20 @@ local function findWirelessModem()
 end
 
 local function findMEPeripheral()
-    -- Prefer the server-side Kenzu CC Bridge. It exposes real AE2 cell usage,
-    -- while some ME Bridge versions only return an estimated aggregate value.
-    for _, name in ipairs(peripheral.getNames()) do
-        if name:match("^ae2:controller") then
-            local controller = peripheral.wrap(name)
-            local ok, version = pcall(function()
-                return controller.getKenzuApiVersion()
-            end)
+    local device, name, how = Peripherals.findME()
+    if device then
+        if how == "kenzu-bridge" then
+            local ok, version = pcall(function() return device.getKenzuApiVersion() end)
             if ok and version then
-                return controller, "Kenzu AE2 API " .. tostring(version), true, tostring(version)
+                return device, "Kenzu AE2 API " .. tostring(version), true, tostring(version)
             end
         end
-    end
-
-    local bridge = peripheral.find("meBridge") or peripheral.find("me_bridge")
-    if bridge then
-        return bridge, "ME Bridge", true
-    end
-
-    for _, name in ipairs(peripheral.getNames()) do
-        if name:match("^ae2:controller") then
-            return peripheral.wrap(name), name, false
+        if device.isConnected or device.getMaxItemStorage or device.getTotalItemStorage then
+            return device, name, true
         end
+        return device, name, false
     end
+    return nil
 end
 
 local function getMEStatus()
@@ -246,6 +237,7 @@ local function compactItem(item)
         displayName = item.displayName or item.name or "Unknown item",
         count = tonumber(item.amount or item.count) or 0,
         fingerprint = item.fingerprint,
+        kind = tostring(item.kind or "item"),
     }
 end
 
@@ -267,26 +259,47 @@ local function sendStorageSnapshot()
 
     refreshStorageMetrics()
 
-    local listMethod = meDevice.listItems
-    local methodArguments = {}
-    if not listMethod and meDevice.getItems then
-        listMethod = meDevice.getItems
+    -- Prefer listResources (items + fluids + chemicals, each row carries kind).
+    -- Fall back to listItems, then getItems({}) for older bridges / AP.
+    local items = nil
+    local listError = nil
+    if meDevice.listResources then
+        local ok, result = pcall(meDevice.listResources)
+        if ok and type(result) == "table" then
+            items = result
+        else
+            listError = result
+        end
+    end
+    if items == nil and meDevice.listItems then
+        local ok, result = pcall(meDevice.listItems)
+        if ok and type(result) == "table" then
+            items = result
+        else
+            listError = result
+        end
+    end
+    if items == nil and meDevice.getItems then
         -- Advanced Peripherals 0.8 requires an empty filter to return all items.
-        methodArguments = { {} }
+        local ok, result = pcall(meDevice.getItems, {})
+        if ok and type(result) == "table" then
+            items = result
+        else
+            listError = result
+        end
     end
 
-    if not listMethod then
-        storageDetails = "No listItems/getItems method"
+    if items == nil then
+        if not (meDevice.listResources or meDevice.listItems or meDevice.getItems) then
+            storageDetails = "No listResources/listItems/getItems method"
+        else
+            storageDetails = "Item scan error: "
+                .. tostring(listError or "Unable to read ME resources")
+        end
         return
     end
 
-    storageDetails = "Reading ME items..."
-    local ok, items, listError = pcall(listMethod, table.unpack(methodArguments))
-    if not ok or type(items) ~= "table" then
-        storageDetails = "Item scan error: "
-            .. tostring(listError or items or "Unable to read ME items")
-        return
-    end
+    storageDetails = "Reading ME resources..."
 
     local compactItems = {}
     for _, item in pairs(items) do
@@ -320,7 +333,27 @@ local function sendStorageSnapshot()
         type = "storage_end",
         snapshotId = snapshotId,
     })
-    storageDetails = "Sent " .. #compactItems .. " item types | cells: "
+    local itemKinds, fluidKinds, chemKinds, otherKinds = 0, 0, 0, 0
+    for _, entry in ipairs(compactItems) do
+        if entry.kind == "fluid" then
+            fluidKinds = fluidKinds + 1
+        elseif entry.kind == "chemical" then
+            chemKinds = chemKinds + 1
+        elseif entry.kind == "other" then
+            otherKinds = otherKinds + 1
+        else
+            itemKinds = itemKinds + 1
+        end
+    end
+    local kindSuffix = ""
+    if fluidKinds > 0 or chemKinds > 0 or otherKinds > 0 then
+        kindSuffix = string.format(
+            " (items %d / fluids %d / chem %d%s)",
+            itemKinds, fluidKinds, chemKinds,
+            otherKinds > 0 and (" / other " .. otherKinds) or "")
+    end
+    storageDetails = "Sent " .. #compactItems .. " resource types"
+        .. kindSuffix .. " | cells: "
         .. #storageMetrics.cells .. " via " .. storageCellSource
 end
 
@@ -392,11 +425,16 @@ while true do
         drawStatus()
     elseif serverEvent == "disconnected" then
         drawStatus()
-    elseif serverEvent == "message" and type(serverMessage) == "table"
-        and serverMessage.type == "console_command"
-        and (serverMessage.target == "storage_node"
-            or serverMessage.target == tostring(os.getComputerID())) then
-        executeConsoleCommand(serverMessage, false)
+    elseif serverEvent == "message" and type(serverMessage) == "table" then
+        if serverMessage.type == "peripherals_update" then
+            Peripherals.applyRemote(serverMessage.peripherals)
+            sendStatus()
+            drawStatus()
+        elseif serverMessage.type == "console_command"
+            and (serverMessage.target == "storage_node"
+                or serverMessage.target == tostring(os.getComputerID())) then
+            executeConsoleCommand(serverMessage, false)
+        end
     end
 
     if event == "timer" and arg1 == heartbeatTimer then
@@ -410,7 +448,8 @@ while true do
         sendStorageSnapshot()
         sendStatus()
         storageTimer = os.startTimer(STORAGE_INTERVAL)
-    elseif event == "peripheral" or event == "peripheral_detach" then
+    elseif event == Peripherals.RELOAD_EVENT
+        or event == "peripheral" or event == "peripheral_detach" then
         modemName = findWirelessModem()
         if modemName and not rednet.isOpen(modemName) then
             rednet.open(modemName)

@@ -1,7 +1,7 @@
 -- Local Rednet telemetry relay for monitor_1 on another computer.
 -- This service has no web connection and keeps working independently.
-local MATRIX_NAME = "inductionPort_0"
-local REACTOR_NAME = "fissionReactorLogicAdapter_0"
+local scriptDirectory = fs.getDir(shell.getRunningProgram())
+local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
 local SNAPSHOT_PROTOCOL = "kenzu_cc.overview.snapshot"
 local INTERVAL = 2
 local JOULES_PER_FE = 2.5
@@ -40,14 +40,42 @@ local function boolean(device, method)
 end
 
 local function isTurbine(name, device)
-    return name:lower():find("turbine", 1, true) ~= nil
-        and device
-        and (device.getProductionRate or device.getFlowRate)
+    return Peripherals.isTurbine(name, device)
+end
+
+local BOILER_EXTRA = {
+    "getHeatedCoolantFilledPercentage", "getCoolantFilledPercentage",
+    "getBoilRate", "getMaxBoilRate", "getTemperature",
+    "getEnvironmentalLoss", "getWater", "getWaterCapacity",
+    "getSteam", "getSteamCapacity",
+}
+
+local FUSION_EXTRA = {
+    "getMinInjectionRate", "getMaxInjectionRate",
+    "getDeuteriumFilledPercentage", "getTritiumFilledPercentage",
+    "getDTFuelFilledPercentage", "getWaterFilledPercentage",
+    "getSteamFilledPercentage",
+}
+
+local function probeExtra(device, candidates, limit)
+    local extra = {}
+    local count = 0
+    for _, methodName in ipairs(candidates) do
+        if count >= (limit or 12) then break end
+        local value = raw(device, methodName)
+        if type(value) == "table" then value = value.amount or value[1] end
+        if type(value) == "number" or type(value) == "boolean" then
+            extra[methodName] = value
+            count = count + 1
+        elseif tonumber(value) ~= nil then
+            extra[methodName] = tonumber(value)
+            count = count + 1
+        end
+    end
+    return extra
 end
 
 local function readSnapshot()
-    local matrix = peripheral.wrap(MATRIX_NAME)
-    local reactor = peripheral.wrap(REACTOR_NAME)
     local turbines = {}
 
     for _, name in ipairs(peripheral.getNames()) do
@@ -63,27 +91,112 @@ local function readSnapshot()
         end
     end
 
+    -- All induction matrices (primary first for legacy `matrix` field).
+    local matrices = {}
+    for _, entry in ipairs(Peripherals.findMatrices()) do
+        matrices[#matrices + 1] = {
+            peripheral = entry.name,
+            kind = "induction",
+            energyPercent = number(entry.device, "getEnergyFilledPercentage") * 100,
+            storedEnergy = number(entry.device, "getEnergy") / JOULES_PER_FE,
+            capacity = number(entry.device, "getMaxEnergy") / JOULES_PER_FE,
+            input = number(entry.device, "getLastInput") / JOULES_PER_FE,
+            output = number(entry.device, "getLastOutput") / JOULES_PER_FE,
+        }
+    end
+
+    -- All fission reactors (primary first for legacy `reactor` field).
+    local reactors = {}
+    for _, entry in ipairs(Peripherals.findReactors()) do
+        local statusOk, running = pcall(entry.device.getStatus)
+        reactors[#reactors + 1] = {
+            peripheral = entry.name,
+            running = statusOk and running == true,
+            statusValid = statusOk and type(running) == "boolean",
+            temperature = number(entry.device, "getTemperature"),
+            actualBurnRate = number(entry.device, "getActualBurnRate"),
+            coolantPercent = number(entry.device, "getCoolantFilledPercentage") * 100,
+            fuelPercent = number(entry.device, "getFuelFilledPercentage") * 100,
+            wastePercent = number(entry.device, "getWasteFilledPercentage") * 100,
+            damage = number(entry.device, "getDamagePercent"),
+        }
+    end
+
+    -- All energy storages: induction matrices plus draconic/other units.
+    local energyUnits = {}
+    for _, unit in ipairs(matrices) do
+        energyUnits[#energyUnits + 1] = {
+            peripheral = unit.peripheral,
+            kind = "induction",
+            stored = unit.storedEnergy,
+            capacity = unit.capacity,
+            input = unit.input,
+            output = unit.output,
+            energyPercent = unit.energyPercent,
+        }
+    end
+    for _, entry in ipairs(Peripherals.findEnergyStorages()) do
+        if entry.kind ~= "induction" then
+            local stored = number(entry.device, "getEnergyStored")
+            local capacity = number(entry.device, "getMaxEnergyStored")
+            local energyPercent = 0
+            if capacity > 0 then energyPercent = stored / capacity * 100 end
+            local input = number(entry.device, "getTransferRate")
+            if input == 0 then input = number(entry.device, "getLastInput") end
+            energyUnits[#energyUnits + 1] = {
+                peripheral = entry.name,
+                kind = entry.kind,
+                stored = stored,
+                capacity = capacity,
+                input = input,
+                output = number(entry.device, "getLastOutput"),
+                energyPercent = energyPercent,
+            }
+        end
+    end
+
+    local boilers = {}
+    for _, entry in ipairs(Peripherals.findBoilers()) do
+        boilers[#boilers + 1] = {
+            peripheral = entry.name,
+            waterPercent = number(entry.device, "getWaterFilledPercentage") * 100,
+            steamPercent = number(entry.device, "getSteamFilledPercentage") * 100,
+            extra = probeExtra(entry.device, BOILER_EXTRA, 12),
+        }
+    end
+
+    local fusion = {}
+    for _, entry in ipairs(Peripherals.findFusionReactors()) do
+        fusion[#fusion + 1] = {
+            peripheral = entry.name,
+            plasmaTemp = number(entry.device, "getPlasmaTemperature"),
+            caseTemp = number(entry.device, "getCaseTemperature"),
+            injectionRate = number(entry.device, "getInjectionRate"),
+            extra = probeExtra(entry.device, FUSION_EXTRA, 12),
+        }
+    end
+
     local matrixData
-    if matrix then
+    if matrices[1] then
         matrixData = {
-            energyPercent = number(matrix, "getEnergyFilledPercentage") * 100,
-            storedEnergy = number(matrix, "getEnergy") / JOULES_PER_FE,
-            capacity = number(matrix, "getMaxEnergy") / JOULES_PER_FE,
-            input = number(matrix, "getLastInput") / JOULES_PER_FE,
-            output = number(matrix, "getLastOutput") / JOULES_PER_FE,
+            energyPercent = matrices[1].energyPercent,
+            storedEnergy = matrices[1].storedEnergy,
+            capacity = matrices[1].capacity,
+            input = matrices[1].input,
+            output = matrices[1].output,
         }
     end
 
     local reactorData
-    if reactor then
+    if reactors[1] then
         reactorData = {
-            running = boolean(reactor, "getStatus"),
-            temperature = number(reactor, "getTemperature"),
-            actualBurnRate = number(reactor, "getActualBurnRate"),
-            coolantPercent = number(reactor, "getCoolantFilledPercentage") * 100,
-            fuelPercent = number(reactor, "getFuelFilledPercentage") * 100,
-            wastePercent = number(reactor, "getWasteFilledPercentage") * 100,
-            damage = number(reactor, "getDamagePercent"),
+            running = reactors[1].running,
+            temperature = reactors[1].temperature,
+            actualBurnRate = reactors[1].actualBurnRate,
+            coolantPercent = reactors[1].coolantPercent,
+            fuelPercent = reactors[1].fuelPercent,
+            wastePercent = reactors[1].wastePercent,
+            damage = reactors[1].damage,
         }
     end
 
@@ -94,6 +207,11 @@ local function readSnapshot()
         matrix = matrixData,
         reactor = reactorData,
         turbines = turbines,
+        reactors = reactors,
+        matrices = matrices,
+        energyUnits = energyUnits,
+        boilers = boilers,
+        fusion = fusion,
     }
 end
 
@@ -105,8 +223,11 @@ local function sendSnapshot()
     print("Overview telemetry relay")
     print("Modem: " .. modemName)
     print("Matrix: " .. (snapshot.matrix and "CONNECTED" or "OFFLINE"))
-    print("Reactor: " .. (snapshot.reactor and "CONNECTED" or "OFFLINE"))
+    print("Reactor: " .. (snapshot.reactor and ("CONNECTED x" .. #snapshot.reactors) or "OFFLINE"))
     print("Turbines: " .. #snapshot.turbines)
+    print("Energy units: " .. #snapshot.energyUnits)
+    print("Boilers: " .. #snapshot.boilers)
+    print("Fusion: " .. #snapshot.fusion)
 end
 
 sendSnapshot()
@@ -116,7 +237,8 @@ while true do
     if event == "timer" and arg1 == timer then
         sendSnapshot()
         timer = os.startTimer(INTERVAL)
-    elseif event == "peripheral" or event == "peripheral_detach" then
+    elseif event == Peripherals.RELOAD_EVENT
+        or event == "peripheral" or event == "peripheral_detach" then
         sendSnapshot()
     end
 end

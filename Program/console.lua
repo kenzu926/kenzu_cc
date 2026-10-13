@@ -49,7 +49,27 @@ function Console.execute(command, statusProvider)
     end
 
     if verb == "peripherals" then
-        return true, limit(peripheralSummary())
+        local ok, summary = pcall(peripheralSummary)
+        local lines = { ok and summary or "Peripheral scan failed" }
+        -- Show configured bindings when the shared module is available.
+        local dirOk, dir = pcall(function() return fs.getDir(shell.getRunningProgram()) end)
+        if dirOk and dir and fs.exists(fs.combine(dir, "peripherals.lua")) then
+            local modOk, Peripherals = pcall(dofile, fs.combine(dir, "peripherals.lua"))
+            if modOk and type(Peripherals) == "table" then
+                local bindingsOk, bindings = pcall(Peripherals.all)
+                if bindingsOk and type(bindings) == "table" then
+                    lines[#lines + 1] = ""
+                    lines[#lines + 1] = "Bindings (peripheral_config set <key> <name>):"
+                    for _, key in ipairs(Peripherals.KEYS) do
+                        local configured = bindings[key]
+                        local present = peripheral.isPresent(configured)
+                        lines[#lines + 1] = ("  %s = %s [%s]"):format(
+                            key, tostring(configured), present and "OK" or "MISS")
+                    end
+                end
+            end
+        end
+        return true, limit(table.concat(lines, "\n"))
     end
 
     if verb == "methods" then

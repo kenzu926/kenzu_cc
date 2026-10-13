@@ -1,7 +1,18 @@
--- Mekanism reactor controller service.
-local MATRIX_NAME = "inductionPort_0"
-local REACTOR_NAME = "fissionReactorLogicAdapter_0"
-local MONITOR_NAME = "monitor_0"
+-- Mekanism fission reactor controller service (multi-unit).
+-- Discovers all fission reactors via Peripherals.findReactors() and runs an
+-- independent safety loop for each of them. Thresholds are shared.
+-- Peripheral names are configurable via peripheral_config.lua /
+-- peripherals.settings and applied live (no reboot). Exact names first,
+-- type/name auto-discovery as fallback so a rename never kills safety loop.
+local scriptDirectory = fs.getDir(shell.getRunningProgram())
+local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
+local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
+local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
+local server = WebSocketClient.new("reactor")
+
+local MATRIX_NAME = Peripherals.get("matrix")
+local REACTOR_NAME = Peripherals.get("reactor")
+local MONITOR_NAME = Peripherals.get("monitor")
 local ME_STATUS_PROTOCOL = "kenzu_cc.me_status"
 local ME_STORAGE_PROTOCOL = "kenzu_cc.me_storage"
 local CONSOLE_REQUEST_PROTOCOL = "kenzu_cc.console.request"
@@ -10,11 +21,6 @@ local TERMINAL_FRAME_PROTOCOL = "kenzu_cc.terminal.frame"
 local TERMINAL_INPUT_PROTOCOL = "kenzu_cc.terminal.input"
 local OVERVIEW_REACTOR_PROTOCOL = "kenzu_cc.overview.reactor"
 local REMOTE_TIMEOUT = 20 * 1000
-
-local scriptDirectory = fs.getDir(shell.getRunningProgram())
-local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
-local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
-local server = WebSocketClient.new("reactor")
 
 local SETTINGS_FILE = "reactor.settings"
 local SAFETY_INTERVAL = 0.25
@@ -76,27 +82,104 @@ local manualHold = settings.get("reactor.manualHold") == true
 startPercent = math.max(0, math.min(99, startPercent))
 stopPercent = math.max(startPercent + 1, math.min(100, stopPercent))
 
-local matrix = assert(
-    peripheral.wrap(MATRIX_NAME),
-    "Induction Matrix not found: " .. MATRIX_NAME
-)
-
-local reactor = assert(
-    peripheral.wrap(REACTOR_NAME),
-    "Fission Reactor not found: " .. REACTOR_NAME
-)
-
+local matrix = nil
+local matrixName = MATRIX_NAME
+local reactor = nil -- primary unit device (legacy mirror, see units[1])
+local units = {} -- { name, device, running, stoppedForSafety, safetyStopReason, manualHold, alertStages }
+local selectedUnit = 1
+local monitorName = Peripherals.get("monitor")
+local monitor = nil
+do
+    local ok, device = pcall(Peripherals.wrap, "monitor")
+    if ok and device then monitor = device end
+end
 -- monitor_0 is only a local control panel. Reactor safety, telemetry and web
--- control must continue to work when that monitor is removed.
-local monitor = peripheral.wrap(MONITOR_NAME)
-if monitor then monitor.setTextScale(0.5) end
+-- control must continue to work when that monitor is removed or renamed.
+if monitor then pcall(monitor.setTextScale, 0.5) end
+
+-- Legacy mirrors of the primary unit state. Kept so console/term output and
+-- the single-unit fields behave exactly as before.
+local energy = 0
+local reactorRunning = false
+local stoppedForSafety = false
+local safetyStopReason = nil
+local alertStages = {}
+
+local function syncPrimary()
+    local primary = units[1]
+    if primary then
+        reactor = primary.device
+        REACTOR_NAME = primary.name
+        reactorRunning = primary.running
+        stoppedForSafety = primary.stoppedForSafety
+        safetyStopReason = primary.safetyStopReason
+        manualHold = primary.manualHold
+        alertStages = primary.alertStages
+    else
+        reactor = nil
+        reactorRunning = false
+    end
+end
+
+local function refreshPeripherals()
+    MATRIX_NAME = Peripherals.get("matrix")
+    REACTOR_NAME = Peripherals.get("reactor")
+    MONITOR_NAME = Peripherals.get("monitor")
+    monitorName = MONITOR_NAME
+    local nextMatrix, nextMatrixName = Peripherals.findMatrix()
+    if nextMatrix then
+        matrix = nextMatrix
+        if type(nextMatrixName) == "string" then matrixName = nextMatrixName end
+    elseif matrixName and not peripheral.isPresent(matrixName) then
+        matrix = nil
+    end
+    local byName = {}
+    for _, unit in ipairs(units) do byName[unit.name] = unit end
+    local discovered = Peripherals.findReactors()
+    local nextUnits = {}
+    for _, entry in ipairs(discovered) do
+        local old = byName[entry.name]
+        if old then
+            old.device = entry.device
+            nextUnits[#nextUnits + 1] = old
+        else
+            nextUnits[#nextUnits + 1] = {
+                name = entry.name,
+                device = entry.device,
+                running = false,
+                stoppedForSafety = false,
+                safetyStopReason = nil,
+                manualHold = manualHold,
+                alertStages = {},
+            }
+        end
+    end
+    units = nextUnits
+    if selectedUnit > math.max(1, #units) then selectedUnit = math.max(1, #units) end
+    if selectedUnit < 1 then selectedUnit = 1 end
+    syncPrimary()
+    if REACTOR_NAME == nil or REACTOR_NAME == "" then
+        REACTOR_NAME = Peripherals.get("reactor")
+    end
+    local wrapOk, nextMonitor = pcall(Peripherals.wrap, "monitor")
+    if wrapOk and nextMonitor then
+        monitor = nextMonitor
+    elseif monitor and monitorName and not peripheral.isPresent(monitorName) then
+        monitor = nil
+    end
+    if monitor then pcall(monitor.setTextScale, 0.5) end
+end
 
 local function findWirelessModem()
-    for _, name in ipairs(peripheral.getNames()) do
-        if peripheral.hasType(name, "modem") then
-            local modem = peripheral.wrap(name)
-            if modem.isWireless and modem.isWireless() then
-                return name
+    local ok, names = pcall(peripheral.getNames)
+    if not ok or type(names) ~= "table" then return nil end
+    for _, name in ipairs(names) do
+        local typeOk, isModem = pcall(peripheral.hasType, name, "modem")
+        if typeOk and isModem then
+            local wrapOk, modem = pcall(peripheral.wrap, name)
+            if wrapOk and modem and modem.isWireless then
+                local wirelessOk, wireless = pcall(modem.isWireless)
+                if wirelessOk and wireless then return name end
             end
         end
     end
@@ -104,22 +187,20 @@ end
 
 local wirelessModemName = findWirelessModem()
 if wirelessModemName then
-    rednet.open(wirelessModemName)
+    pcall(rednet.open, wirelessModemName)
 end
 
 local width, height = 51, 19
-if monitor then width, height = monitor.getSize() end
-local energy = 0
-local reactorRunning = false
-local stoppedForSafety = false
-local safetyStopReason = nil
+if monitor then
+    local sizeOk, w, h = pcall(monitor.getSize)
+    if sizeOk and w then width, height = w, h end
+end
 local message = wirelessModemName
     and "Controller started"
     or "Wireless modem not found"
 local lastRemoteHeartbeat = nil
 local remoteMEConnected = false
 local remoteComputerId = nil
-local alertStages = {}
 
 local buttons = {}
 
@@ -136,7 +217,11 @@ local function saveThresholds()
     settings.set("reactor.temperatureStop", temperatureStop)
     settings.set("reactor.damageStopPercent", damageStopPercent)
     settings.set("reactor.wasteStopPercent", wasteStopPercent)
-    settings.set("reactor.manualHold", manualHold)
+    if units[1] then
+        settings.set("reactor.manualHold", units[1].manualHold)
+    else
+        settings.set("reactor.manualHold", manualHold)
+    end
     settings.save(SETTINGS_FILE)
 end
 
@@ -186,63 +271,85 @@ local function isRemoteOnline()
         and os.epoch("utc") - lastRemoteHeartbeat <= REMOTE_TIMEOUT
 end
 
+local function selectedUnitState()
+    return units[selectedUnit]
+end
+
 local function drawScreen()
+    if monitor and monitorName and not peripheral.isPresent(monitorName) then
+        monitor = nil
+    end
     if not monitor then return end
-    width, height = monitor.getSize()
-    buttons = {}
+    local sizeOk, w, h = pcall(monitor.getSize)
+    if sizeOk and w and h then width, height = w, h end
+    local drawOk = pcall(function()
+        buttons = {}
 
-    monitor.setBackgroundColor(colors.black)
-    monitor.setTextColor(colors.white)
-    monitor.clear()
+        monitor.setBackgroundColor(colors.black)
+        monitor.setTextColor(colors.white)
+        monitor.clear()
 
-    writeCentered(2, "FISSION REACTOR CONTROL", colors.yellow)
-    writeCentered(4, ("Energy: %.1f%%"):format(energy * 100), colors.white)
-    drawBar(6, energy)
+        local unit = selectedUnitState()
+        local unitLabel = unit
+            and (unit.name .. " (" .. selectedUnit .. "/" .. #units .. ")")
+            or "NO REACTORS"
+        drawButton("unitPrev", 3, 1, 7, 3, "<", colors.gray)
+        drawButton("unitNext", width - 6, 1, width - 2, 3, ">", colors.gray)
+        writeCentered(2, unitLabel, colors.yellow)
 
-    local stateColor = reactorRunning and colors.lime or colors.red
-    writeCentered(9, "Reactor: " .. (reactorRunning and "ON" or "OFF"), stateColor)
+        writeCentered(4, ("Energy: %.1f%%"):format(energy * 100), colors.white)
+        drawBar(6, energy)
 
-    local minusX1 = 3
-    local minusX2 = 9
-    local plusX1 = width - 8
-    local plusX2 = width - 2
+        local shownRunning = unit and unit.running or false
+        local stateColor = shownRunning and colors.lime or colors.red
+        writeCentered(9, "Reactor: " .. (shownRunning and "ON" or "OFF"), stateColor)
+        if unit and unit.stoppedForSafety then
+            writeCentered(10, "HELD: " .. tostring(unit.safetyStopReason or "safety"), colors.orange)
+        end
 
-    writeCentered(12, ("Start at: %d%%"):format(startPercent), colors.white)
-    drawButton("startMinus", minusX1, 11, minusX2, 13, "-", colors.red)
-    drawButton("startPlus", plusX1, 11, plusX2, 13, "+", colors.green)
+        local minusX1 = 3
+        local minusX2 = 9
+        local plusX1 = width - 8
+        local plusX2 = width - 2
 
-    writeCentered(17, ("Stop at:  %d%%"):format(stopPercent), colors.white)
-    drawButton("stopMinus", minusX1, 16, minusX2, 18, "-", colors.red)
-    drawButton("stopPlus", plusX1, 16, plusX2, 18, "+", colors.green)
+        writeCentered(12, ("Start at: %d%%"):format(startPercent), colors.white)
+        drawButton("startMinus", minusX1, 11, minusX2, 13, "-", colors.red)
+        drawButton("startPlus", plusX1, 11, plusX2, 13, "+", colors.green)
 
-    local remoteOnline = isRemoteOnline()
-    writeCentered(
-        21,
-        "Computer 1: " .. (remoteOnline and "ONLINE" or "OFFLINE"),
-        remoteOnline and colors.lime or colors.red
-    )
+        writeCentered(17, ("Stop at:  %d%%"):format(stopPercent), colors.white)
+        drawButton("stopMinus", minusX1, 16, minusX2, 18, "-", colors.red)
+        drawButton("stopPlus", plusX1, 16, plusX2, 18, "+", colors.green)
 
-    local meText = "UNKNOWN"
-    local meColor = colors.orange
-    if remoteOnline then
-        meText = remoteMEConnected and "CONNECTED" or "DISCONNECTED"
-        meColor = remoteMEConnected and colors.lime or colors.red
-    end
-    writeCentered(23, "ME System: " .. meText, meColor)
+        local remoteOnline = isRemoteOnline()
+        writeCentered(
+            21,
+            "Computer 1: " .. (remoteOnline and "ONLINE" or "OFFLINE"),
+            remoteOnline and colors.lime or colors.red
+        )
 
-    if remoteOnline and remoteComputerId then
-        writeCentered(25, "Rednet ID: " .. remoteComputerId, colors.lightGray)
-    end
+        local meText = "UNKNOWN"
+        local meColor = colors.orange
+        if remoteOnline then
+            meText = remoteMEConnected and "CONNECTED" or "DISCONNECTED"
+            meColor = remoteMEConnected and colors.lime or colors.red
+        end
+        writeCentered(23, "ME System: " .. meText, meColor)
 
-    writeCentered(
-        27,
-        "Web: " .. (server:isConnected() and "ONLINE" or "OFFLINE"),
-        server:isConnected() and colors.lime or colors.red
-    )
-    writeCentered(math.min(height, 29), message, colors.lightGray)
+        if remoteOnline and remoteComputerId then
+            writeCentered(25, "Rednet ID: " .. remoteComputerId, colors.lightGray)
+        end
 
-    monitor.setBackgroundColor(colors.black)
-    monitor.setTextColor(colors.white)
+        writeCentered(
+            27,
+            "Web: " .. (server:isConnected() and "ONLINE" or "OFFLINE"),
+            server:isConnected() and colors.lime or colors.red
+        )
+        writeCentered(math.min(height, 29), message, colors.lightGray)
+
+        monitor.setBackgroundColor(colors.black)
+        monitor.setTextColor(colors.white)
+    end)
+    if not drawOk then monitor = nil end
 end
 
 local function checkedNumber(method)
@@ -252,19 +359,26 @@ local function checkedNumber(method)
     return tonumber(value)
 end
 
-local function readSafetySnapshot()
-    local statusOk, running = pcall(reactor.getStatus)
+local function readSafetySnapshotFor(device)
+    if not matrix or not device then
+        return { statusValid = false, running = false }
+    end
+    local statusOk, running = pcall(device.getStatus)
     return {
         statusValid = statusOk and type(running) == "boolean",
         running = statusOk and running == true,
         energy = checkedNumber(matrix.getEnergyFilledPercentage),
-        temperature = checkedNumber(reactor.getTemperature),
-        damage = checkedNumber(reactor.getDamagePercent),
-        coolant = checkedNumber(reactor.getCoolantFilledPercentage),
-        heatedCoolant = checkedNumber(reactor.getHeatedCoolantFilledPercentage),
-        fuel = checkedNumber(reactor.getFuelFilledPercentage),
-        waste = checkedNumber(reactor.getWasteFilledPercentage),
+        temperature = checkedNumber(device.getTemperature),
+        damage = checkedNumber(device.getDamagePercent),
+        coolant = checkedNumber(device.getCoolantFilledPercentage),
+        heatedCoolant = checkedNumber(device.getHeatedCoolantFilledPercentage),
+        fuel = checkedNumber(device.getFuelFilledPercentage),
+        waste = checkedNumber(device.getWasteFilledPercentage),
     }
+end
+
+local function readSafetySnapshot()
+    return readSafetySnapshotFor(reactor)
 end
 
 local function sendSafetyAlert(channel, stage, value, threshold, unit)
@@ -295,43 +409,45 @@ local function fallingStage(value, threshold, margin)
     return 0
 end
 
-local function updateAlertStage(channel, stage, value, threshold, unit)
-    local previous = alertStages[channel] or 0
+local function updateAlertStage(stages, channel, stage, value, threshold, unit)
+    stages = stages or alertStages
+    local previous = stages[channel] or 0
     if stage == 0 then
         -- Re-arm only after the value leaves the warning zone completely. This
         -- prevents chat spam when a measurement oscillates around its limit.
-        alertStages[channel] = 0
+        stages[channel] = 0
     elseif stage > previous then
         local stageName = stage == 2 and "triggered" or "warning"
         if sendSafetyAlert(channel, stageName, value, threshold, unit) then
-            alertStages[channel] = stage
+            stages[channel] = stage
         end
     end
 end
 
-local function updateSafetyAlerts(snapshot)
-    updateAlertStage("energy", safetyEnergyEnabled
+local function updateSafetyAlerts(snapshot, stages)
+    stages = stages or alertStages
+    updateAlertStage(stages, "energy", safetyEnergyEnabled
             and risingStage(snapshot.energy and snapshot.energy * 100, stopPercent, 10) or 0,
         snapshot.energy and snapshot.energy * 100, stopPercent, "%")
-    updateAlertStage("steam", safetySteamEnabled
+    updateAlertStage(stages, "steam", safetySteamEnabled
             and risingStage(snapshot.heatedCoolant and snapshot.heatedCoolant * 100,
                 steamStopPercent, 10) or 0,
         snapshot.heatedCoolant and snapshot.heatedCoolant * 100, steamStopPercent, "%")
-    updateAlertStage("water", safetyWaterEnabled
+    updateAlertStage(stages, "water", safetyWaterEnabled
             and fallingStage(snapshot.coolant and snapshot.coolant * 100,
                 waterStopPercent, 10) or 0,
         snapshot.coolant and snapshot.coolant * 100, waterStopPercent, "%")
-    updateAlertStage("fuel", safetyFuelEnabled
+    updateAlertStage(stages, "fuel", safetyFuelEnabled
             and fallingStage(snapshot.fuel and snapshot.fuel * 100,
                 fuelStopPercent, 10) or 0,
         snapshot.fuel and snapshot.fuel * 100, fuelStopPercent, "%")
-    updateAlertStage("temperature",
+    updateAlertStage(stages, "temperature",
         risingStage(snapshot.temperature, temperatureStop, 100),
         snapshot.temperature, temperatureStop, " K")
-    updateAlertStage("damage",
+    updateAlertStage(stages, "damage",
         risingStage(snapshot.damage, damageStopPercent, 1, true),
         snapshot.damage, damageStopPercent, "%")
-    updateAlertStage("waste",
+    updateAlertStage(stages, "waste",
         risingStage(snapshot.waste and snapshot.waste * 100, wasteStopPercent, 10),
         snapshot.waste and snapshot.waste * 100, wasteStopPercent, "%")
 
@@ -341,7 +457,7 @@ local function updateSafetyAlerts(snapshot)
         or (safetySteamEnabled and snapshot.heatedCoolant == nil)
         or (safetyWaterEnabled and snapshot.coolant == nil)
         or (safetyFuelEnabled and snapshot.fuel == nil)
-    updateAlertStage("sensors", sensorFault and 2 or 0, nil, nil, "")
+    updateAlertStage(stages, "sensors", sensorFault and 2 or 0, nil, nil, "")
 end
 
 local function getSafetyStopReason(snapshot)
@@ -374,69 +490,80 @@ local function getSafetyStopReason(snapshot)
     end
 end
 
-local function emergencyScram(reason)
-    stoppedForSafety = true
-    safetyStopReason = reason
+local function emergencyScram(unit, reason)
+    unit.stoppedForSafety = true
+    unit.safetyStopReason = reason
     -- Only the normal battery cycle may restart automatically. Every reactor
     -- fault stays latched until a player explicitly starts it again.
-    manualHold = reason ~= "battery threshold"
+    unit.manualHold = reason ~= "battery threshold"
 
-    local commandOk, commandError = pcall(reactor.scram)
-    local statusOk, stillRunning = pcall(reactor.getStatus)
-    reactorRunning = not statusOk or stillRunning == true
-    if commandOk and statusOk and not reactorRunning then
+    local device = unit.device
+    local commandOk, commandError = false, "reactor peripheral missing"
+    local statusOk, stillRunning = false, nil
+    if device and device.scram then commandOk, commandError = pcall(device.scram) end
+    if device and device.getStatus then statusOk, stillRunning = pcall(device.getStatus) end
+    unit.running = not statusOk or stillRunning == true
+    syncPrimary()
+    if commandOk and statusOk and not unit.running then
         message = "SAFETY SCRAM: " .. reason
-        alertStages.scram = 0
+        unit.alertStages.scram = 0
     else
         message = "SCRAM UNCONFIRMED: " .. reason
             .. (commandOk and "" or " / " .. tostring(commandError))
-        if (alertStages.scram or 0) < 2
+        if (unit.alertStages.scram or 0) < 2
             and sendSafetyAlert("scram", "failed", nil, nil, "") then
-            alertStages.scram = 2
+            unit.alertStages.scram = 2
         end
     end
     saveThresholds()
-    return not reactorRunning
+    return not unit.running
 end
 
-local function activateAndConfirm()
-    local commandOk, commandError = pcall(reactor.activate)
-    local statusOk, actualRunning = pcall(reactor.getStatus)
+local function activateAndConfirm(unit)
+    local device = unit.device
+    if not device or not device.activate then
+        message = "START FAILED: reactor peripheral missing (" .. tostring(unit.name) .. ")"
+        return false
+    end
+    local commandOk, commandError = pcall(device.activate)
+    local statusOk, actualRunning = pcall(device.getStatus)
     if not commandOk or not statusOk or actualRunning ~= true then
-        reactorRunning = statusOk and actualRunning == true
+        unit.running = statusOk and actualRunning == true
+        syncPrimary()
         message = "START FAILED: " .. tostring(commandError or "status unconfirmed")
         return false
     end
-    reactorRunning = true
-    stoppedForSafety = false
-    safetyStopReason = nil
-    manualHold = false
+    unit.running = true
+    unit.stoppedForSafety = false
+    unit.safetyStopReason = nil
+    unit.manualHold = false
+    syncPrimary()
     saveThresholds()
     return true
 end
 
-local function updateController()
-    local snapshot = readSafetySnapshot()
+local function updateUnit(unit)
+    local snapshot = readSafetySnapshotFor(unit.device)
     if snapshot.energy ~= nil then energy = snapshot.energy end
-    updateSafetyAlerts(snapshot)
+    updateSafetyAlerts(snapshot, unit.alertStages)
     local actualRunning = snapshot.running
 
     -- A state change made directly in-game is a manual command. Remember a
     -- manual stop so the low-energy automation cannot immediately undo it.
-    if snapshot.statusValid and actualRunning ~= reactorRunning and not stoppedForSafety then
-        manualHold = not actualRunning
+    if snapshot.statusValid and actualRunning ~= unit.running and not unit.stoppedForSafety then
+        unit.manualHold = not actualRunning
         saveThresholds()
     end
-    if snapshot.statusValid then reactorRunning = actualRunning end
+    if snapshot.statusValid then unit.running = actualRunning end
 
     local stopReason = getSafetyStopReason(snapshot)
     if stopReason then
-        if reactorRunning or not snapshot.statusValid then
-            emergencyScram(stopReason)
+        if unit.running or not snapshot.statusValid then
+            emergencyScram(unit, stopReason)
         elseif stopReason ~= "battery threshold" then
-            stoppedForSafety = true
-            safetyStopReason = stopReason
-            manualHold = true
+            unit.stoppedForSafety = true
+            unit.safetyStopReason = stopReason
+            unit.manualHold = true
             saveThresholds()
         end
         return
@@ -444,23 +571,30 @@ local function updateController()
 
     -- Starting it directly in the reactor GUI is an explicit acknowledgement,
     -- but only after every mandatory sensor is back in a safe state.
-    if reactorRunning and stoppedForSafety then
-        stoppedForSafety = false
-        safetyStopReason = nil
-        manualHold = false
+    if unit.running and unit.stoppedForSafety then
+        unit.stoppedForSafety = false
+        unit.safetyStopReason = nil
+        unit.manualHold = false
         message = "Manual in-game restart acknowledged"
         saveThresholds()
     end
 
-    if reactorRunning or manualHold then return end
+    if unit.running or unit.manualHold then return end
     local batteryMayStart = snapshot.energy ~= nil and snapshot.energy <= startPercent / 100
-    if stoppedForSafety then
-        if safetyStopReason == "battery threshold" and batteryMayStart then
-            if activateAndConfirm() then message = "Started: battery below start threshold" end
+    if unit.stoppedForSafety then
+        if unit.safetyStopReason == "battery threshold" and batteryMayStart then
+            if activateAndConfirm(unit) then message = "Started: battery below start threshold" end
         end
     elseif safetyEnergyEnabled and batteryMayStart then
-        if activateAndConfirm() then message = "Started: battery below start threshold" end
+        if activateAndConfirm(unit) then message = "Started: battery below start threshold" end
     end
+end
+
+local function updateController()
+    for _, unit in ipairs(units) do
+        updateUnit(unit)
+    end
+    syncPrimary()
 end
 
 local function safeNumber(method, fallback)
@@ -484,20 +618,82 @@ local function safeAmount(method)
     return tonumber(value) or 0
 end
 
-local function sendReactorStatus()
-    local storedEnergy = safeNumber(matrix.getEnergy) / JOULES_PER_FE
-    local capacity = safeNumber(matrix.getMaxEnergy) / JOULES_PER_FE
-    local input = safeNumber(matrix.getLastInput) / JOULES_PER_FE
-    local output = safeNumber(matrix.getLastOutput) / JOULES_PER_FE
-    local statusOk, liveRunning = pcall(reactor.getStatus)
+local function readUnitEntry(unit)
+    local device = unit.device
+    local function rm(methodName)
+        if not device then return nil end
+        local method = device[methodName]
+        if type(method) ~= "function" then return nil end
+        local ok, value = pcall(method)
+        if not ok then return nil end
+        return tonumber(value)
+    end
+    local statusOk, liveRunning = false, nil
+    if device and device.getStatus then statusOk, liveRunning = pcall(device.getStatus) end
     local statusValid = statusOk and type(liveRunning) == "boolean"
-    local burnRate = checkedNumber(reactor.getBurnRate)
-    local actualBurnRate = checkedNumber(reactor.getActualBurnRate)
-    local maxBurnRate = checkedNumber(reactor.getMaxBurnRate)
+    -- Never publish the cached controller state as live telemetry. The reactor
+    -- may have been stopped in its GUI between controller ticks.
+    if statusValid then
+        unit.running = liveRunning
+        syncPrimary()
+    end
+    local burnRate = rm("getBurnRate")
+    local actualBurnRate = rm("getActualBurnRate")
+    local maxBurnRate = rm("getMaxBurnRate")
+    return {
+        peripheral = unit.name,
+        running = statusValid and liveRunning == true,
+        statusValid = statusValid,
+        temperature = rm("getTemperature") or 0,
+        damage = rm("getDamagePercent") or 0,
+        coolantPercent = (rm("getCoolantFilledPercentage") or 0) * 100,
+        fuelPercent = (rm("getFuelFilledPercentage") or 0) * 100,
+        wastePercent = (rm("getWasteFilledPercentage") or 0) * 100,
+        heatedCoolantPercent = (rm("getHeatedCoolantFilledPercentage") or 0) * 100,
+        burnRate = burnRate or 0,
+        actualBurnRate = actualBurnRate or 0,
+        maxBurnRate = maxBurnRate or 0,
+        coolant = safeAmount(device and device.getCoolant),
+        coolantCapacity = rm("getCoolantCapacity") or 0,
+        waste = safeAmount(device and device.getWaste),
+        wasteCapacity = rm("getWasteCapacity") or 0,
+        fuel = safeAmount(device and device.getFuel),
+        fuelCapacity = rm("getFuelCapacity") or 0,
+        heatedCoolant = safeAmount(device and device.getHeatedCoolant),
+        heatedCoolantCapacity = rm("getHeatedCoolantCapacity") or 0,
+        heatingRate = rm("getHeatingRate") or 0,
+        startPercent = startPercent,
+        stopPercent = stopPercent,
+        safetyStopped = unit.stoppedForSafety == true,
+        safetyReason = unit.safetyStopReason,
+        manualHold = unit.manualHold == true,
+    }
+end
+
+local function sendReactorStatus()
+    refreshPeripherals()
+    local function m(methodName) return matrix and matrix[methodName] end
+    local primaryDevice = units[1] and units[1].device or nil
+    local function r(methodName) return primaryDevice and primaryDevice[methodName] end
+    local storedEnergy = safeNumber(m("getEnergy")) / JOULES_PER_FE
+    local capacity = safeNumber(m("getMaxEnergy")) / JOULES_PER_FE
+    local input = safeNumber(m("getLastInput")) / JOULES_PER_FE
+    local output = safeNumber(m("getLastOutput")) / JOULES_PER_FE
+    local statusOk, liveRunning = false, nil
+    if primaryDevice and primaryDevice.getStatus then
+        statusOk, liveRunning = pcall(primaryDevice.getStatus)
+    end
+    local statusValid = statusOk and type(liveRunning) == "boolean"
+    local burnRate = checkedNumber(r("getBurnRate"))
+    local actualBurnRate = checkedNumber(r("getActualBurnRate"))
+    local maxBurnRate = checkedNumber(r("getMaxBurnRate"))
 
     -- Never publish the cached controller state as live telemetry. The reactor
     -- may have been stopped in its GUI between controller ticks.
-    if statusValid then reactorRunning = liveRunning end
+    if statusValid then
+        if units[1] then units[1].running = liveRunning end
+        syncPrimary()
+    end
 
     local matrixData = {
             name = MATRIX_NAME,
@@ -507,40 +703,41 @@ local function sendReactorStatus()
             input = input,
             output = output,
             net = input - output,
-            energyNeeded = safeNumber(matrix.getEnergyNeeded) / JOULES_PER_FE,
+            energyNeeded = safeNumber(m("getEnergyNeeded")) / JOULES_PER_FE,
             energyUnit = "FE",
             joulesPerFE = JOULES_PER_FE,
+            peripheral = MATRIX_NAME,
         }
 
     local reactorData = {
-            name = REACTOR_NAME,
+            name = units[1] and units[1].name or REACTOR_NAME,
             running = statusValid and liveRunning == true,
             statusValid = statusValid,
             startPercent = startPercent,
             stopPercent = stopPercent,
-            temperature = safeNumber(reactor.getTemperature),
-            damage = safeNumber(reactor.getDamagePercent),
-            coolantPercent = safeNumber(reactor.getCoolantFilledPercentage) * 100,
-            coolant = safeAmount(reactor.getCoolant),
-            coolantCapacity = safeNumber(reactor.getCoolantCapacity),
-            wastePercent = safeNumber(reactor.getWasteFilledPercentage) * 100,
-            waste = safeAmount(reactor.getWaste),
-            wasteCapacity = safeNumber(reactor.getWasteCapacity),
+            temperature = safeNumber(r("getTemperature")),
+            damage = safeNumber(r("getDamagePercent")),
+            coolantPercent = safeNumber(r("getCoolantFilledPercentage")) * 100,
+            coolant = safeAmount(r("getCoolant")),
+            coolantCapacity = safeNumber(r("getCoolantCapacity")),
+            wastePercent = safeNumber(r("getWasteFilledPercentage")) * 100,
+            waste = safeAmount(r("getWaste")),
+            wasteCapacity = safeNumber(r("getWasteCapacity")),
             burnRate = burnRate or 0,
             burnRateValid = burnRate ~= nil,
             actualBurnRate = actualBurnRate or 0,
             actualBurnRateValid = actualBurnRate ~= nil,
             maxBurnRate = maxBurnRate or 0,
             maxBurnRateValid = maxBurnRate ~= nil and maxBurnRate > 0,
-            fuelPercent = safeNumber(reactor.getFuelFilledPercentage) * 100,
-            fuel = safeAmount(reactor.getFuel),
-            fuelCapacity = safeNumber(reactor.getFuelCapacity),
-            heatedCoolantPercent = safeNumber(reactor.getHeatedCoolantFilledPercentage) * 100,
-            heatedCoolant = safeAmount(reactor.getHeatedCoolant),
-            heatedCoolantCapacity = safeNumber(reactor.getHeatedCoolantCapacity),
-            heatingRate = safeNumber(reactor.getHeatingRate),
-            environmentalLoss = safeNumber(reactor.getEnvironmentalLoss),
-            boilEfficiency = safeNumber(reactor.getBoilEfficiency) * 100,
+            fuelPercent = safeNumber(r("getFuelFilledPercentage")) * 100,
+            fuel = safeAmount(r("getFuel")),
+            fuelCapacity = safeNumber(r("getFuelCapacity")),
+            heatedCoolantPercent = safeNumber(r("getHeatedCoolantFilledPercentage")) * 100,
+            heatedCoolant = safeAmount(r("getHeatedCoolant")),
+            heatedCoolantCapacity = safeNumber(r("getHeatedCoolantCapacity")),
+            heatingRate = safeNumber(r("getHeatingRate")),
+            environmentalLoss = safeNumber(r("getEnvironmentalLoss")),
+            boilEfficiency = safeNumber(r("getBoilEfficiency")) * 100,
             safety = {
                 energyEnabled = safetyEnergyEnabled,
                 steamEnabled = safetySteamEnabled,
@@ -563,8 +760,15 @@ local function sendReactorStatus()
             remoteMEConnected = remoteMEConnected,
         }
 
+    local reactorsData = {}
+    for _, unit in ipairs(units) do
+        reactorsData[#reactorsData + 1] = readUnitEntry(unit)
+    end
+    syncPrimary()
+
     server:send({ type = "matrix_status", data = matrixData })
     server:send({ type = "reactor_status", data = reactorData })
+    server:send({ type = "reactors_status", reactors = reactorsData })
 
     if wirelessModemName then
         rednet.broadcast({
@@ -572,21 +776,30 @@ local function sendReactorStatus()
             computerId = os.getComputerID(),
             matrix = matrixData,
             reactor = reactorData,
+            reactors = reactorsData,
         }, OVERVIEW_REACTOR_PROTOCOL)
     end
 end
 
 local function consoleStatus()
-    return table.concat({
+    local lines = {
         "Service: reactor controller",
         "Matrix: " .. MATRIX_NAME,
         ("Energy: %.2f%%"):format(energy * 100),
-        "Reactor: " .. (reactorRunning and "ONLINE" or "SCRAMMED"),
-        "Manual hold: " .. (manualHold and "ON" or "OFF"),
-        ("Thresholds: %d%% / %d%%"):format(startPercent, stopPercent),
-        "ME node: " .. (isRemoteOnline() and "ONLINE" or "OFFLINE"),
-        "Web: " .. (server:isConnected() and "CONNECTED" or "OFFLINE"),
-    }, "\n")
+        ("Reactors: %d"):format(#units),
+    }
+    for i, unit in ipairs(units) do
+        local marker = (i == selectedUnit) and "*" or " "
+        lines[#lines + 1] = ( "%s%d. %s: %s%s"):format(
+            marker, i, unit.name,
+            unit.running and "ONLINE" or "SCRAMMED",
+            unit.stoppedForSafety and (" (HELD: " .. tostring(unit.safetyStopReason or "safety") .. ")") or "")
+    end
+    lines[#lines + 1] = "Manual hold: " .. (manualHold and "ON" or "OFF")
+    lines[#lines + 1] = ("Thresholds: %d%% / %d%%"):format(startPercent, stopPercent)
+    lines[#lines + 1] = "ME node: " .. (isRemoteOnline() and "ONLINE" or "OFFLINE")
+    lines[#lines + 1] = "Web: " .. (server:isConnected() and "CONNECTED" or "OFFLINE")
+    return table.concat(lines, "\n")
 end
 
 local function handleConsoleCommand(command)
@@ -608,6 +821,24 @@ local function sendCommandResult(command, ok, resultMessage)
         ok = ok,
         message = resultMessage,
     })
+end
+
+-- Website commands may carry an optional string field `peripheral` with the
+-- unit name. set_safety / set_thresholds are global. Unit commands without a
+-- matching unit are ignored silently (no response).
+local function findUnitByName(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    for _, unit in ipairs(units) do
+        if unit.name == name then return unit end
+    end
+    return nil
+end
+
+local function targetUnit(command)
+    if type(command.peripheral) == "string" and command.peripheral ~= "" then
+        return findUnitByName(command.peripheral)
+    end
+    return units[1]
 end
 
 local function handleServerCommand(command)
@@ -674,19 +905,31 @@ local function handleServerCommand(command)
     end
 
     if command.action == "reactor_scram" then
-        local ok, commandError = pcall(reactor.scram)
-        local statusOk, stillRunning = pcall(reactor.getStatus)
+        local unit = targetUnit(command)
+        if not unit then return end
+        local device = unit.device
+        if not device or not device.scram then
+            unit.manualHold = true
+            saveThresholds()
+            syncPrimary()
+            sendCommandResult(command, false, "Reactor peripheral missing")
+            return
+        end
+        local ok, commandError = pcall(device.scram)
+        local statusOk, stillRunning = pcall(device.getStatus)
         if ok and statusOk and stillRunning == false then
-            reactorRunning = false
-            stoppedForSafety = false
-            safetyStopReason = nil
-            manualHold = true
+            unit.running = false
+            unit.stoppedForSafety = false
+            unit.safetyStopReason = nil
+            unit.manualHold = true
+            syncPrimary()
             saveThresholds()
             message = "SCRAM from web"
             sendCommandResult(command, true, "Reactor stopped")
         else
-            reactorRunning = not statusOk or stillRunning == true
-            manualHold = true
+            unit.running = not statusOk or stillRunning == true
+            unit.manualHold = true
+            syncPrimary()
             saveThresholds()
             message = "WEB SCRAM UNCONFIRMED"
             sendCommandResult(command, false,
@@ -696,11 +939,13 @@ local function handleServerCommand(command)
     end
 
     if command.action == "reactor_start" then
-        local snapshot = readSafetySnapshot()
+        local unit = targetUnit(command)
+        if not unit then return end
+        local snapshot = readSafetySnapshotFor(unit.device)
         local stopReason = getSafetyStopReason(snapshot)
         local forceDisabled = false
-        if reactor.isForceDisabled then
-            local forceCheckOk, forceCheckValue = pcall(reactor.isForceDisabled)
+        if unit.device and unit.device.isForceDisabled then
+            local forceCheckOk, forceCheckValue = pcall(unit.device.isForceDisabled)
             forceDisabled = not forceCheckOk or forceCheckValue == true
         end
 
@@ -711,7 +956,7 @@ local function handleServerCommand(command)
             return
         end
 
-        if activateAndConfirm() then
+        if activateAndConfirm(unit) then
             message = "Started from web"
             sendCommandResult(command, true, "Reactor started")
         else
@@ -721,8 +966,15 @@ local function handleServerCommand(command)
     end
 
     if command.action == "set_burn_rate" then
+        local unit = targetUnit(command)
+        if not unit then return end
+        local device = unit.device
+        if not device or not device.getMaxBurnRate then
+            sendCommandResult(command, false, "Reactor burn-rate telemetry is unavailable")
+            return
+        end
         local burnRate = tonumber(command.burnRate)
-        local maxBurnRate = checkedNumber(reactor.getMaxBurnRate)
+        local maxBurnRate = checkedNumber(device.getMaxBurnRate)
         if not maxBurnRate or maxBurnRate <= 0 then
             sendCommandResult(command, false, "Reactor burn-rate telemetry is unavailable")
             return
@@ -732,8 +984,8 @@ local function handleServerCommand(command)
             return
         end
 
-        local ok, commandError = pcall(reactor.setBurnRate, burnRate)
-        local confirmedRate = checkedNumber(reactor.getBurnRate)
+        local ok, commandError = pcall(device.setBurnRate, burnRate)
+        local confirmedRate = checkedNumber(device.getBurnRate)
         if ok and confirmedRate and math.abs(confirmedRate - burnRate) < 0.051 then
             message = ("Burn rate set to %.2f mB/t"):format(confirmedRate)
             sendCommandResult(command, true, message)
@@ -755,6 +1007,22 @@ end
 
 local function handleTouch(x, y)
     local changed = false
+
+    if isInside(buttons.unitPrev, x, y) then
+        if #units > 0 then
+            selectedUnit = selectedUnit - 1
+            if selectedUnit < 1 then selectedUnit = #units end
+        end
+        drawScreen()
+        return
+    elseif isInside(buttons.unitNext, x, y) then
+        if #units > 0 then
+            selectedUnit = selectedUnit + 1
+            if selectedUnit > #units then selectedUnit = 1 end
+        end
+        drawScreen()
+        return
+    end
 
     if isInside(buttons.startMinus, x, y) then
         startPercent = math.max(0, startPercent - 1)
@@ -780,10 +1048,20 @@ local function handleTouch(x, y)
     end
 end
 
+refreshPeripherals()
 saveThresholds()
 updateController()
 server:connect()
 drawScreen()
+
+local function sendPeripheralsStatus()
+    server:send({
+        type = "peripherals_status",
+        computerRole = "reactor",
+        peripherals = Peripherals.all(),
+        resolved = { matrix = MATRIX_NAME, reactor = REACTOR_NAME, monitor = monitorName },
+    })
+end
 
 local safetyTimer = os.startTimer(SAFETY_INTERVAL)
 local telemetryTimer = os.startTimer(TELEMETRY_INTERVAL)
@@ -804,6 +1082,14 @@ while true do
             handleServerCommand(serverMessage)
             updateController()
             sendReactorStatus()
+            drawScreen()
+        elseif serverMessage.type == "peripherals_update" then
+            local applied = Peripherals.applyRemote(serverMessage.peripherals)
+            refreshPeripherals()
+            message = "Peripherals updated from web: " .. tostring(applied)
+            updateController()
+            sendReactorStatus()
+            sendPeripheralsStatus()
             drawScreen()
         elseif serverMessage.type == "console_command"
             and (serverMessage.target == "reactor"
@@ -827,9 +1113,14 @@ while true do
         sendReactorStatus()
         drawScreen()
         telemetryTimer = os.startTimer(TELEMETRY_INTERVAL)
-    elseif event == "monitor_touch" and arg1 == MONITOR_NAME then
+    elseif event == "monitor_touch" and arg1 == monitorName then
         handleTouch(arg2, arg3)
-    elseif event == "monitor_resize" and arg1 == MONITOR_NAME then
+    elseif event == "monitor_resize" and arg1 == monitorName then
+        drawScreen()
+    elseif event == Peripherals.RELOAD_EVENT
+        or event == "peripheral" or event == "peripheral_detach" then
+        refreshPeripherals()
+        sendPeripheralsStatus()
         drawScreen()
     elseif event == "rednet_message" and arg3 == ME_STATUS_PROTOCOL then
         local payload = arg2

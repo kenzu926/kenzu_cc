@@ -31,6 +31,7 @@ function Client.new(role)
     return setmetatable({
         role = role,
         url = connectionUrl,
+        baseUrl = baseUrl,
         token = settings.get("kenzu.serverToken"),
         socket = nil,
         connecting = false,
@@ -39,7 +40,18 @@ function Client.new(role)
         lastReceived = 0,
         heartbeatConfirmed = false,
         lastError = nil,
+        authFailedAt = 0,
     }, Client)
+end
+
+-- Token may be rotated via installer without reboot. Re-read before each hello.
+function Client:getToken()
+    local ok, value = pcall(function()
+        settings.load("server.settings")
+        return settings.get("kenzu.serverToken")
+    end)
+    if ok and type(value) == "string" and value ~= "" then self.token = value end
+    return self.token
 end
 
 function Client:isConnected()
@@ -55,15 +67,21 @@ function Client:connect()
     if self.socket then
         if self.heartbeatConfirmed and self.lastReceived > 0
             and now - self.lastReceived >= STALE_CONNECTION_MS then
-            pcall(self.socket.close)
+            pcall(function() self.socket.close() end)
             self.socket = nil
             self.connecting = false
+            self.heartbeatConfirmed = false
             self.lastError = "WebSocket heartbeat timed out"
             self.lastAttempt = 0
         elseif now - self.lastPing >= KEEPALIVE_INTERVAL_MS then
             self.lastPing = now
             self:send({ type = "ping", sentAt = now })
         end
+        return false
+    end
+
+    -- Wrong token: do not spam the server every 5s.
+    if self.authFailedAt > 0 and now - self.authFailedAt < 60 * 1000 then
         return false
     end
 
@@ -110,7 +128,8 @@ function Client:send(payload)
     end
 
     local encoded = textutils.serializeJSON(payload)
-    local sent, sendError = pcall(self.socket.send, encoded)
+    local socket = self.socket
+    local sent, sendError = pcall(function() socket.send(encoded) end)
     if not sent then
         self.lastError = tostring(sendError)
         self.socket = nil
@@ -128,6 +147,8 @@ function Client:handleEvent(event, arg1, arg2, arg3)
         self.lastError = nil
         self.lastReceived = os.epoch("utc")
         self.lastPing = self.lastReceived
+        self.heartbeatConfirmed = false
+        self:getToken()
         self:send({
             type = "hello",
             role = self.role,
@@ -161,9 +182,12 @@ function Client:handleEvent(event, arg1, arg2, arg3)
         end
         if decoded.type == "auth_error" then
             self.lastError = tostring(decoded.message or "Invalid access token")
-            if self.socket then pcall(self.socket.close) end
+            self.authFailedAt = os.epoch("utc")
+            local socket = self.socket
+            if socket then pcall(function() socket.close() end) end
             self.socket = nil
             self.connecting = false
+            self.lastAttempt = os.epoch("utc")
             return "disconnected"
         end
         if decoded.type == "pong" then

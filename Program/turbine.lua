@@ -2,12 +2,13 @@
 local CHECK_INTERVAL = 2
 local JOULES_PER_FE = 2.5
 local OVERVIEW_TURBINE_PROTOCOL = "kenzu_cc.overview.turbines"
-local MATRIX_NAME = "inductionPort_0"
-local REACTOR_NAME = "fissionReactorLogicAdapter_0"
+local MATRIX_NAME = Peripherals.get("matrix")
+local REACTOR_NAME = Peripherals.get("reactor")
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
+local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
 local server = GatewayClient.new("turbine")
 
 local function openWirelessModem()
@@ -34,24 +35,12 @@ local function hasPeripheralType(name, peripheralType)
 end
 
 local function isTurbine(name)
-    local lowerName = name:lower()
-    return lowerName:match("^turbinevalue") ~= nil
-        or lowerName:match("^turbinevalve") ~= nil
-        or hasPeripheralType(name, "turbineValue")
-        or hasPeripheralType(name, "turbineValve")
-        or lowerName:find("turbine", 1, true) ~= nil
+    local device = peripheral.wrap(name)
+    return Peripherals.isTurbine(name, device)
 end
 
 local function findTurbines()
-    local turbines = {}
-    for _, name in ipairs(peripheral.getNames()) do
-        if isTurbine(name) then
-            local device = peripheral.wrap(name)
-            if device then turbines[#turbines + 1] = { name = name, device = device } end
-        end
-    end
-    table.sort(turbines, function(left, right) return left.name < right.name end)
-    return turbines
+    return Peripherals.findTurbines()
 end
 
 local function safeNumber(device, methodName, fallback)
@@ -161,25 +150,36 @@ while true do
     local event, arg1, arg2, arg3 = os.pullEvent()
     local serverEvent, message = server:handleEvent(event, arg1, arg2, arg3)
 
-    if serverEvent == "message" and type(message) == "table"
-        and message.type == "console_command"
-        and (message.target == "turbine" or message.target == tostring(os.getComputerID())) then
-        local ok, output = SafeConsole.execute(message.command, statusText)
-        server:send({
-            type = "console_output",
-            requestId = message.requestId,
-            target = "turbine",
-            computerId = os.getComputerID(),
-            ok = ok,
-            output = output,
-        })
+    if serverEvent == "message" and type(message) == "table" then
+        if message.type == "peripherals_update" then
+            Peripherals.applyRemote(message.peripherals)
+            MATRIX_NAME = Peripherals.get("matrix")
+            REACTOR_NAME = Peripherals.get("reactor")
+            sendStatus()
+        elseif message.type == "console_command"
+            and (message.target == "turbine" or message.target == tostring(os.getComputerID())) then
+            local ok, output = SafeConsole.execute(message.command, statusText)
+            server:send({
+                type = "console_output",
+                requestId = message.requestId,
+                target = "turbine",
+                computerId = os.getComputerID(),
+                ok = ok,
+                output = output,
+            })
+        end
     end
 
     if event == "timer" and arg1 == timer then
         server:connect()
+        MATRIX_NAME = Peripherals.get("matrix")
+        REACTOR_NAME = Peripherals.get("reactor")
         sendStatus()
         timer = os.startTimer(CHECK_INTERVAL)
-    elseif event == "peripheral" or event == "peripheral_detach" then
+    elseif event == Peripherals.RELOAD_EVENT
+        or event == "peripheral" or event == "peripheral_detach" then
+        MATRIX_NAME = Peripherals.get("matrix")
+        REACTOR_NAME = Peripherals.get("reactor")
         sendStatus()
     end
 end

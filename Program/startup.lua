@@ -1,8 +1,45 @@
 -- Project service launcher.
 -- installer.lua is responsible for downloading and updating these files.
+local Peripherals
+do
+    local dir = fs.getDir(shell.getRunningProgram())
+    local modPath = fs.combine(dir, "peripherals.lua")
+    if fs.exists(modPath) then
+        local ok, mod = pcall(dofile, modPath)
+        if ok and type(mod) == "table" then Peripherals = mod end
+    end
+end
+
+local function cfg(key, fallback)
+    if Peripherals then
+        local ok, value = pcall(Peripherals.get, key)
+        if ok and type(value) == "string" and value ~= "" then return value end
+    end
+    return fallback
+end
 local function reactorIsReady()
-    return peripheral.find("inductionPort") ~= nil
-        and peripheral.find("fissionReactorLogicAdapter") ~= nil
+    if Peripherals then
+        local ok, found = pcall(Peripherals.findReactors)
+        if ok and type(found) == "table" and #found > 0 then return true end
+    end
+    if Peripherals == nil then
+        return peripheral.find("inductionPort") ~= nil
+            and peripheral.find("fissionReactorLogicAdapter") ~= nil
+    end
+    return false
+end
+
+local function machinesIsReady()
+    if Peripherals then
+        local okBoilers, boilers = pcall(Peripherals.findBoilers)
+        if okBoilers and type(boilers) == "table" and #boilers > 0 then return true end
+        local okFusion, fusion = pcall(Peripherals.findFusionReactors)
+        if okFusion and type(fusion) == "table" and #fusion > 0 then return true end
+        local okEnergy, storages = pcall(Peripherals.findEnergyStorages)
+        if okEnergy and type(storages) == "table" and #storages > 0 then return true end
+        return false
+    end
+    return false
 end
 
 local function meNodeIsReady()
@@ -21,20 +58,38 @@ local function turbineIsReady()
 end
 
 local function overviewMonitorIsReady()
+    if Peripherals then return Peripherals.wrap("overviewMonitor") ~= nil end
     return peripheral.isPresent("monitor_1")
 end
 
 local function plansMonitorIsReady()
+    if Peripherals then return Peripherals.wrap("plansMonitor") ~= nil end
     return peripheral.isPresent("monitor_2")
 end
 
 local function overviewRelayIsReady()
-    return peripheral.isPresent("inductionPort_0")
+    if peripheral.isPresent("inductionPort_0")
         or peripheral.isPresent("fissionReactorLogicAdapter_0")
-        or turbineIsReady()
+        or turbineIsReady() then
+        return true
+    end
+    if Peripherals then
+        local okBoilers, boilers = pcall(Peripherals.findBoilers)
+        if okBoilers and type(boilers) == "table" and #boilers > 0 then return true end
+        local okFusion, fusion = pcall(Peripherals.findFusionReactors)
+        if okFusion and type(fusion) == "table" and #fusion > 0 then return true end
+        local okEnergy, storages = pcall(Peripherals.findEnergyStorages)
+        if okEnergy and type(storages) == "table" then
+            for _, entry in ipairs(storages) do
+                if entry.kind == "draconic" or entry.kind == "other" then return true end
+            end
+        end
+    end
+    return false
 end
 
 local function playerDetectorIsReady()
+    if Peripherals then return Peripherals.findDetector() ~= nil end
     if peripheral.isPresent("playerDetector_0") then return true end
     for _, name in ipairs(peripheral.getNames()) do
         if name:lower():find("playerdetector", 1, true) then return true end
@@ -97,6 +152,11 @@ local PROGRAMS = {
         path = "turbine.lua",
         title = "Turbine",
         shouldRun = turbineIsReady,
+    },
+    {
+        path = "machines.lua",
+        title = "Machines",
+        shouldRun = machinesIsReady,
     },
 }
 

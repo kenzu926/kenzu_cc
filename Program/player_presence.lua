@@ -1,7 +1,12 @@
 -- Player presence observer for playerDetector_0.
 -- The server-side mod is authoritative; this service triggers an immediate
 -- sync on detector transitions and displays the current policy state.
-local DETECTOR_NAME = "playerDetector_0"
+local scriptDirectory = fs.getDir(shell.getRunningProgram())
+local Peripherals
+if scriptDirectory and fs.exists(fs.combine(scriptDirectory, "peripherals.lua")) then
+    Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
+end
+local DETECTOR_NAME = Peripherals and Peripherals.get("playerDetector") or "playerDetector_0"
 local INTERVAL = 2
 
 local detector
@@ -9,6 +14,10 @@ local previousCount
 local lastResult = "Waiting for first scan"
 
 local function findDetector()
+    if Peripherals then
+        local autoDevice, autoName = Peripherals.findDetector()
+        if autoDevice then return autoDevice, autoName end
+    end
     local exact = peripheral.wrap(DETECTOR_NAME)
     if exact then return exact, DETECTOR_NAME end
     for _, peripheralName in ipairs(peripheral.getNames()) do
@@ -89,9 +98,12 @@ local timer = os.startTimer(INTERVAL)
 while true do
     local event, arg1 = os.pullEvent()
     if event == "timer" and arg1 == timer then
+        if Peripherals then DETECTOR_NAME = Peripherals.get("playerDetector") end
         refresh(false)
         timer = os.startTimer(INTERVAL)
-    elseif event == "peripheral" or event == "peripheral_detach" then
+    elseif event == "peripheral" or event == "peripheral_detach"
+        or (Peripherals and event == Peripherals.RELOAD_EVENT) then
+        if Peripherals then DETECTOR_NAME = Peripherals.get("playerDetector") end
         refresh(true)
     end
 end

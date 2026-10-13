@@ -51,25 +51,30 @@ local modemCount = openWirelessModems()
 print("Update agent started")
 print("Wireless modems: " .. modemCount)
 
+local lastUpdateAt = 0
+local UPDATE_COOLDOWN_MS = 5 * 60 * 1000
+
 while true do
     local event, arg1, arg2, arg3 = os.pullEvent()
 
     if event == "rednet_message" and arg3 == UPDATE_PROTOCOL then
         local senderId, message = arg1, arg2
-        local token = expectedToken()
         local now = os.epoch("utc")
         purgeOldRequests(now)
 
         if type(message) == "table"
             and message.action == "update"
+            and message.token == nil
             and senderId ~= os.getComputerID()
             and type(message.requestId) == "string"
-            and token ~= ""
-            and message.token == token
-            and not handledRequests[message.requestId] then
+            and not handledRequests[message.requestId]
+            and now - lastUpdateAt >= UPDATE_COOLDOWN_MS then
             handledRequests[message.requestId] = now
+            lastUpdateAt = now
             print("Update requested by computer " .. tostring(senderId))
             startUpdate(message.requestId)
+        elseif type(message) == "table" and message.token ~= nil then
+            print("Ignored legacy update request with token from " .. tostring(senderId))
         end
     elseif event == "peripheral" or event == "peripheral_detach" then
         openWirelessModems()
