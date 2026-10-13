@@ -141,6 +141,11 @@ local function appendCells(target, rawCells)
             target[#target + 1] = {
                 item = cellName(cell, index),
                 cellType = cell.cellType or cell.type or "item",
+                category = cell.category
+                    or (Peripherals and Peripherals.cellCategory(cell.cellType or cell.type))
+                    or (Peripherals and Peripherals.cellCategory(cellName(cell, index)))
+                    or "other",
+                mod = cell.mod or tostring(cellName(cell, index)):match("^([^:]+):") or "",
                 totalBytes = totalBytes,
                 usedBytes = usedBytes,
                 usedKnown = usedBytes ~= nil,

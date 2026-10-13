@@ -306,9 +306,15 @@ local function appendLocalCells(target, rawCells)
             if type(item) == "table" then
                 item = item.displayName or item.name or item.id or item.registryName
             end
+            item = tostring(item or ("ME storage cell " .. tostring(index)))
             target[#target + 1] = {
-                item = tostring(item or ("ME storage cell " .. tostring(index))),
+                item = item,
                 cellType = cell.cellType or cell.type or "item",
+                category = cell.category
+                    or (Peripherals and Peripherals.cellCategory(cell.cellType or cell.type))
+                    or (Peripherals and Peripherals.cellCategory(item))
+                    or "other",
+                mod = cell.mod or item:match("^([^:]+):") or "",
                 totalBytes = totalBytes,
                 usedBytes = usedBytes,
                 usedKnown = usedBytes ~= nil,
@@ -642,14 +648,30 @@ local function meSnapshot()
     return { connected = false, total = 0, used = 0, available = 0, cells = {}, cellSource = "none" }, "OFFLINE"
 end
 
-local function cellTypeLabel(rawType)
-    local s = tostring(rawType or "item")
-    local lower = s:lower()
-    if lower == "item" then return "ITEMS" end
-    if lower == "fluid" then return "FLUIDS" end
-    -- "modid:chemical" -> "CHEMICAL", unknown stays readable.
-    local short = s:match("([^:/]+)$") or s
-    return short:upper()
+local CATEGORY_LABELS = {
+    item = "ITEMS",
+    fluid = "FLUIDS",
+    chemical = "CHEMICALS",
+    source = "SOURCE",
+    mana = "MANA",
+    energy = "ENERGY",
+    other = "OTHER",
+}
+
+local function categoryOf(cell)
+    if type(cell.category) == "string" and cell.category ~= "" then
+        return cell.category:lower()
+    end
+    if Peripherals and Peripherals.cellCategory then
+        local inferred = Peripherals.cellCategory(cell.cellType or cell.type)
+            or Peripherals.cellCategory(cell.item)
+        if inferred then return inferred end
+    end
+    return "other"
+end
+
+local function categoryLabel(category)
+    return CATEGORY_LABELS[category] or tostring(category):upper()
 end
 
 -- --------------------------------------------------------------------------
@@ -700,7 +722,7 @@ local function drawEnergyTab(y1, y2, width)
     for index = first, last do
         local entry = entries[index]
         local r = listTop + (index - first) * rowsPer
-        if r + 2 <= y2 then
+        if r + 3 <= y2 then
             local stale = entry.source == "STALE"
             text(2, r, ("[%s] %s"):format(entry.kind or "PWR", tostring(entry.name):sub(1, nameWidth)),
                 stale and colors.orange or colors.cyan)
@@ -714,7 +736,7 @@ local function drawEnergyTab(y1, y2, width)
             local color = colors.lime
             if stale then color = colors.orange
             elseif (tonumber(entry.percent) or 0) >= 95 then color = colors.orange end
-            bar(2, r + 2, math.max(8, width - 2), entry.percent, color, 1)
+            bar(2, r + 2, math.max(8, width - 2), entry.percent, color, 2)
         end
     end
     if pages > 1 then
@@ -893,15 +915,14 @@ local function drawMETab(y1, y2, width)
     local total = tonumber(metrics.total) or 0
     local used = tonumber(metrics.used) or 0
     local percent = total > 0 and used / total * 100 or 0
-    -- Group by cellType (generic, no hardcoded type list beyond labels).
+    -- Group by storage category (item/fluid/chemical/source/mana/energy/other).
     local groups = {}
     local order = {}
     for _, cell in ipairs(cells) do
-        local rawType = cell.cellType or cell.type or "item"
-        local key = tostring(rawType):lower()
+        local key = categoryOf(cell)
         local group = groups[key]
         if not group then
-            group = { key = key, label = cellTypeLabel(rawType), count = 0, used = 0, total = 0 }
+            group = { key = key, label = categoryLabel(key), count = 0, used = 0, total = 0 }
             groups[key] = group
             order[#order + 1] = group
         end
@@ -926,7 +947,7 @@ local function drawMETab(y1, y2, width)
         y = y + 1
     end
     for _, group in ipairs(order) do
-        if y + 1 > y2 - 2 then break end
+        if y + 2 > y2 - 2 then break end
         local groupPercent = group.total > 0 and group.used / group.total * 100 or 0
         text(2, y, ("%s x%d  %s/%s"):format(group.label, group.count,
             shorten(group.used), shorten(group.total)):sub(1, width - 10), colors.cyan)
@@ -934,8 +955,8 @@ local function drawMETab(y1, y2, width)
         local barColor = colors.lime
         if stale then barColor = colors.orange
         elseif groupPercent >= 95 then barColor = colors.orange end
-        bar(2, y + 1, math.max(8, width - 2), groupPercent, barColor, 1)
-        y = y + 2
+        bar(2, y + 1, math.max(8, width - 2), groupPercent, barColor, 2)
+        y = y + 3
     end
     local cellSource = metrics.cellSource
     if y <= y2 then

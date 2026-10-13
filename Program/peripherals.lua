@@ -508,4 +508,18 @@ function Peripherals.status()
     return result
 end
 
+-- Storage-cell category from a key-type id or cell item id.
+-- Returns item|fluid|chemical|source|mana|energy or nil (caller falls back).
+function Peripherals.cellCategory(token)
+    if type(token) ~= "string" or token == "" then return nil end
+    local hay = token:lower()
+    if hay:find("chemic", 1, true) then return "chemical" end
+    if hay:find("fluid", 1, true) or hay:find("liquid", 1, true) then return "fluid" end
+    if hay:find("source", 1, true) then return "source" end
+    if hay:find("mana", 1, true) then return "mana" end
+    if hay:find("flux", 1, true) or hay:find("energy", 1, true) then return "energy" end
+    if hay:find("item", 1, true) then return "item" end
+    return nil
+end
+
 return Peripherals
