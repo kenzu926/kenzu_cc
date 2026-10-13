@@ -519,6 +519,9 @@ function Peripherals.cellCategory(token)
     if hay:find("mana", 1, true) then return "mana" end
     if hay:find("flux", 1, true) or hay:find("energy", 1, true) then return "energy" end
     if hay:find("item", 1, true) then return "item" end
+    if hay:find("cell", 1, true) or hay:find("disk", 1, true) or hay:find("drive", 1, true) then
+        return "item"
+    end
     return nil
 end
 

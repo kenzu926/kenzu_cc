@@ -948,13 +948,17 @@ local function drawMETab(y1, y2, width)
     end
     for _, group in ipairs(order) do
         if y + 2 > y2 - 2 then break end
-        local groupPercent = group.total > 0 and group.used / group.total * 100 or 0
-        text(2, y, ("%s x%d  %s/%s"):format(group.label, group.count,
-            shorten(group.used), shorten(group.total)):sub(1, width - 10), colors.cyan)
-        text(math.max(2, width - 7), y, ("%5.1f%%"):format(groupPercent), colors.white)
-        local barColor = colors.lime
-        if stale then barColor = colors.orange
-        elseif groupPercent >= 95 then barColor = colors.orange end
+        local hasData = group.total > 0
+        local groupPercent = hasData and group.used / group.total * 100 or 0
+        text(2, y, ("%s x%d  %s"):format(group.label, group.count,
+            hasData and (shorten(group.used) .. "/" .. shorten(group.total)) or "NO DATA"):sub(1, width - 10), colors.cyan)
+        text(math.max(2, width - 7), y, hasData and ("%5.1f%%"):format(groupPercent) or "  ---", colors.white)
+        local barColor = colors.gray
+        if hasData then
+            barColor = colors.lime
+            if stale then barColor = colors.orange
+            elseif groupPercent >= 95 then barColor = colors.orange end
+        end
         bar(2, y + 1, math.max(8, width - 2), groupPercent, barColor, 2)
         y = y + 3
     end

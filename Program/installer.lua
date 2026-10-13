@@ -22,6 +22,8 @@ local FILES = {
     "me_node.lua",
     "turbine.lua",
     "machines.lua",
+    "monitor_relay.lua",
+    "files.lua",
     "remote_terminal.lua",
     "overview_monitor.lua",
     "plans_monitor.lua",

@@ -88,6 +88,18 @@ local function overviewRelayIsReady()
     return false
 end
 
+local function anyMonitorPresent()
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.hasType then
+            local ok, isMonitor = pcall(peripheral.hasType, name, "monitor")
+            if ok and isMonitor then return true end
+        elseif name:lower():find("monitor", 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 local function playerDetectorIsReady()
     if Peripherals then return Peripherals.findDetector() ~= nil end
     if peripheral.isPresent("playerDetector_0") then return true end
@@ -157,6 +169,16 @@ local PROGRAMS = {
         path = "machines.lua",
         title = "Machines",
         shouldRun = machinesIsReady,
+    },
+    {
+        path = "monitor_relay.lua",
+        title = "Monitor Relay",
+        shouldRun = anyMonitorPresent,
+    },
+    {
+        path = "files.lua",
+        title = "Files",
+        shouldRun = function() return true end,
     },
 }
 
