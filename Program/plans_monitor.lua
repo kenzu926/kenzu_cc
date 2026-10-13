@@ -9,6 +9,7 @@ local cacheFile = fs.combine(scriptDirectory, "plans.cache")
 local leaderboardCacheFile = fs.combine(scriptDirectory, "leaderboards.cache")
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
+local Screen = dofile(fs.combine(scriptDirectory, "screen.lua"))
 local server = GatewayClient.new("plans")
 MONITOR_NAME = Peripherals.get("plansMonitor")
 CHATBOX_NAME = Peripherals.get("chatBox")
@@ -90,8 +91,9 @@ local function saveCache()
 end
 
 local function getMonitor()
-    local monitor = peripheral.wrap(MONITOR_NAME) or Peripherals.wrap("plansMonitor")
-    if monitor then monitor.setTextScale(0.5) end
+    local monitor = Screen.attach(MONITOR_NAME)
+        or peripheral.wrap(MONITOR_NAME) or Peripherals.wrap("plansMonitor")
+    if monitor and monitor.setTextScale then pcall(monitor.setTextScale, 0.5) end
     return monitor
 end
 
@@ -332,6 +334,7 @@ local function draw()
     button(monitor, tabX, 4, tabWidth, "PLANS", function() page = "plans" end, page == "plans")
     button(monitor, tabX + tabWidth + gap, 4, tabWidth, "LEADERBOARD", function() page = "leaderboards" end,
         page == "leaderboards")
+    Screen.commit(MONITOR_NAME)
 end
 
 local function handleTouch(x, y)

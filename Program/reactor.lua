@@ -8,6 +8,7 @@ local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local WebSocketClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
 local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
+local Screen = dofile(fs.combine(scriptDirectory, "screen.lua"))
 local server = WebSocketClient.new("reactor")
 
 local MATRIX_NAME = Peripherals.get("matrix")
@@ -88,11 +89,7 @@ local reactor = nil -- primary unit device (legacy mirror, see units[1])
 local units = {} -- { name, device, running, stoppedForSafety, safetyStopReason, manualHold, alertStages }
 local selectedUnit = 1
 local monitorName = Peripherals.get("monitor")
-local monitor = nil
-do
-    local ok, device = pcall(Peripherals.wrap, "monitor")
-    if ok and device then monitor = device end
-end
+local monitor = Screen.attach(monitorName)
 -- monitor_0 is only a local control panel. Reactor safety, telemetry and web
 -- control must continue to work when that monitor is removed or renamed.
 if monitor then pcall(monitor.setTextScale, 0.5) end
@@ -161,8 +158,8 @@ local function refreshPeripherals()
     if REACTOR_NAME == nil or REACTOR_NAME == "" then
         REACTOR_NAME = Peripherals.get("reactor")
     end
-    local wrapOk, nextMonitor = pcall(Peripherals.wrap, "monitor")
-    if wrapOk and nextMonitor then
+    local nextMonitor = Screen.attach(monitorName)
+    if nextMonitor then
         monitor = nextMonitor
     elseif monitor and monitorName and not peripheral.isPresent(monitorName) then
         monitor = nil
@@ -350,6 +347,7 @@ local function drawScreen()
         monitor.setTextColor(colors.white)
     end)
     if not drawOk then monitor = nil end
+    if monitor then Screen.commit(monitorName) end
 end
 
 local function checkedNumber(method)

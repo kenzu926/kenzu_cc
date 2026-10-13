@@ -18,6 +18,7 @@ local FILES = {
     "console.lua",
     "peripherals.lua",
     "peripheral_config.lua",
+    "screen.lua",
     "reactor.lua",
     "me_node.lua",
     "turbine.lua",

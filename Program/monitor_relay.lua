@@ -1,5 +1,7 @@
 -- Streams attached monitor screens to the website (read-only frames) and
 -- injects touch events coming from the website as local monitor_touch events.
+-- CC:Tweaked monitors have no getLine(), so frames come from JSON files
+-- written by Screen.commit() in the monitor apps (overview/plans/reactor).
 -- Runs on any computer with monitors; needs no reboot to reconfigure.
 local CAPTURE_INTERVAL = 1
 local RESEND_INTERVAL_MS = 5 * 1000
@@ -7,6 +9,7 @@ local RESEND_INTERVAL_MS = 5 * 1000
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local GatewayClient = dofile(fs.combine(scriptDirectory, "gateway_client.lua"))
 local SafeConsole = dofile(fs.combine(scriptDirectory, "console.lua"))
+local Screen = dofile(fs.combine(scriptDirectory, "screen.lua"))
 local Peripherals
 if fs.exists(fs.combine(scriptDirectory, "peripherals.lua")) then
     Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
@@ -39,80 +42,33 @@ local function findMonitors()
     return result
 end
 
-local function paletteSnapshot(device)
-    if not device.getPaletteColor then return nil end
-    local palette = {}
-    for index = 0, 15 do
-        local ok, r, g, b = pcall(device.getPaletteColor, 2 ^ index)
-        if not ok or type(r) ~= "number" then return nil end
-        palette[index + 1] = {
-            math.floor(r * 255 + 0.5),
-            math.floor(g * 255 + 0.5),
-            math.floor(b * 255 + 0.5),
-        }
-    end
-    return palette
-end
-
 local signatures = {}
 local lastSentAt = {}
-
-local function captureFrame(name)
-    local device = peripheral.wrap(name)
-    if not device or not device.getLine or not device.getSize then return nil end
-    local okSize, width, height = pcall(device.getSize)
-    if not okSize or type(width) ~= "number" or type(height) ~= "number" then return nil end
-    width = math.max(1, math.min(300, width))
-    height = math.max(1, math.min(200, height))
-    local lines, signatureParts = {}, {}
-    for y = 1, height do
-        local ok, textValue, fgValue, bgValue = pcall(device.getLine, y)
-        if not ok then return nil end
-        lines[y] = {
-            text = tostring(textValue or ""),
-            fg = tostring(fgValue or ""),
-            bg = tostring(bgValue or ""),
-        }
-        signatureParts[#signatureParts + 1] =
-            tostring(textValue or "") .. tostring(fgValue or "") .. tostring(bgValue or "")
-    end
-    local cursorX, cursorY = 1, 1
-    if device.getCursorPos then
-        local ok, x, y = pcall(device.getCursorPos)
-        if ok and type(x) == "number" then cursorX, cursorY = x, y end
-    end
-    local cursorBlink = false
-    if device.getCursorBlink then
-        local ok, blink = pcall(device.getCursorBlink)
-        if ok then cursorBlink = blink == true end
-    end
-    signatureParts[#signatureParts + 1] =
-        table.concat({ cursorX, cursorY, cursorBlink and 1 or 0 }, ":")
-    return {
-        type = "monitor_frame",
-        monitor = name,
-        computerId = os.getComputerID(),
-        label = os.getComputerLabel(),
-        width = width,
-        height = height,
-        cursorX = cursorX,
-        cursorY = cursorY,
-        cursorBlink = cursorBlink,
-        lines = lines,
-        palette = paletteSnapshot(device),
-        sentAt = os.epoch("utc"),
-    }, table.concat(signatureParts, "|")
-end
 
 local function sendAll(force)
     local now = os.epoch("utc")
     for _, name in ipairs(findMonitors()) do
-        local frame, signature = captureFrame(name)
-        if frame then
-            if force or signature ~= signatures[name]
+        local frame, raw = Screen.readFrame(name)
+        if frame and raw then
+            if force or raw ~= signatures[name]
                 or now - (lastSentAt[name] or 0) >= RESEND_INTERVAL_MS then
-                if server:isConnected() then server:send(frame) end
-                signatures[name] = signature
+                if server:isConnected() then
+                    server:send({
+                        type = "monitor_frame",
+                        monitor = name,
+                        computerId = os.getComputerID(),
+                        label = os.getComputerLabel(),
+                        width = frame.width,
+                        height = frame.height,
+                        cursorX = frame.cursorX or 1,
+                        cursorY = frame.cursorY or 1,
+                        cursorBlink = frame.cursorBlink == true,
+                        lines = frame.lines,
+                        palette = nil,
+                        sentAt = now,
+                    })
+                end
+                signatures[name] = raw
                 lastSentAt[name] = now
             end
         end
@@ -120,11 +76,14 @@ local function sendAll(force)
 end
 
 local function statusText()
-    local names = findMonitors()
-    local lines = { "Monitor relay: " .. #names }
-    for _, name in ipairs(names) do lines[#lines + 1] = "- " .. name end
+    local lines = {}
+    for _, name in ipairs(findMonitors()) do
+        local frame = Screen.readFrame(name)
+        lines[#lines + 1] = "- " .. name .. (frame and " (frame OK)" or " (no frame yet)")
+    end
+    if #lines == 0 then lines[1] = "No monitors attached" end
     lines[#lines + 1] = "Gateway: " .. (server:isConnected() and "CONNECTED" or "OFFLINE")
-    return table.concat(lines, "\n")
+    return "Monitor relay:\n" .. table.concat(lines, "\n")
 end
 
 local function handleTouch(message)

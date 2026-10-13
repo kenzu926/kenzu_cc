@@ -2,6 +2,7 @@
 -- Local devices plus rednet data from another computer (legacy + snapshot).
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local Peripherals = dofile(fs.combine(scriptDirectory, "peripherals.lua"))
+local Screen = dofile(fs.combine(scriptDirectory, "screen.lua"))
 local MONITOR_NAME = Peripherals.get("overviewMonitor")
 local MATRIX_NAME = Peripherals.get("matrix")
 local REACTOR_NAME = Peripherals.get("reactor")
@@ -15,13 +16,14 @@ local REMOTE_TIMEOUT = 10 * 1000
 local JOULES_PER_FE = 2.5
 local STARTED_AT = os.epoch("utc")
 
-local monitor = Peripherals.wrap("overviewMonitor")
+local monitor = Screen.attach(MONITOR_NAME)
 if not monitor then
     -- No assert: show hint on the local terminal, keep rednet relay working.
     print("Overview monitor not found: " .. tostring(MONITOR_NAME))
     print("Run: peripheral_config set overviewMonitor <name>")
+else
+    pcall(monitor.setTextScale, 0.5)
 end
-if monitor then pcall(monitor.setTextScale, 0.5) end
 
 local matrix = peripheral.wrap(MATRIX_NAME)
 local reactor = peripheral.wrap(REACTOR_NAME)
@@ -1007,7 +1009,7 @@ end
 
 local function draw()
     if not monitor then
-        monitor = Peripherals.wrap("overviewMonitor")
+        monitor = Screen.attach(MONITOR_NAME)
         if monitor then pcall(monitor.setTextScale, 0.5) else return end
     end
     local width, height = monitor.getSize()
@@ -1052,6 +1054,7 @@ local function draw()
         hasRednet and colors.lime or colors.red, colors.gray)
     local right = tostring(source or "OFFLINE")
     text(math.max(2, width - #right), height, right, colors.yellow, colors.gray)
+    Screen.commit(MONITOR_NAME)
 end
 
 local function handleTouch(x, y)
@@ -1074,7 +1077,7 @@ while true do
         MATRIX_NAME = Peripherals.get("matrix")
         REACTOR_NAME = Peripherals.get("reactor")
         ME_NAME = Peripherals.get("meBridge")
-        monitor = Peripherals.wrap("overviewMonitor") or monitor
+        monitor = Screen.attach(MONITOR_NAME) or monitor
         if monitor then pcall(monitor.setTextScale, 0.5) end
         matrix = peripheral.wrap(MATRIX_NAME) or matrix
         reactor = peripheral.wrap(REACTOR_NAME) or reactor
@@ -1233,7 +1236,7 @@ while true do
         MATRIX_NAME = Peripherals.get("matrix")
         REACTOR_NAME = Peripherals.get("reactor")
         ME_NAME = Peripherals.get("meBridge")
-        monitor = Peripherals.wrap("overviewMonitor") or peripheral.wrap(MONITOR_NAME)
+        monitor = Screen.attach(MONITOR_NAME) or monitor
         if monitor then pcall(monitor.setTextScale, 0.5) end
         matrix = peripheral.wrap(MATRIX_NAME)
         reactor = peripheral.wrap(REACTOR_NAME)
