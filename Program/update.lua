@@ -1,8 +1,6 @@
 -- Updates this computer and asks the other Rednet computers to update too.
 local arguments = { ... }
 local UPDATE_PROTOCOL = "kenzu_cc.update.request"
-local INSTALLER_URL =
-    "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua"
 
 local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local settingsPath = fs.combine(scriptDirectory, "server.settings")
@@ -33,27 +31,66 @@ end
 
 local serverUrl, serverToken = loadConnectionSettings()
 
+-- Direct updates bypass GitHub: the site itself serves Program/*.lua at
+-- <http(s)://host>/program/<file> (same host:port as the WebSocket URL).
+-- GitHub stays as a fallback when the site mirror is empty or unreachable.
+local GITHUB_INSTALLER_URL =
+    "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/installer.lua"
+
+local function siteProgramBase()
+    local host = tostring(serverUrl or ""):match("^wss?://([^/]+)")
+    if not host or host == "" then return nil end
+    local scheme = tostring(serverUrl):sub(1, 3) == "wss" and "https://" or "http://"
+    return scheme .. host .. "/program"
+end
+
+local function fetchSource(url, label)
+    local headers = { ["Cache-Control"] = "no-cache" }
+    if serverToken ~= "" then headers.Authorization = "Bearer " .. serverToken end
+    local requestOk, response, requestError, errorResponse = pcall(http.get, url, headers)
+    if not requestOk or not response then
+        -- Older CC builds reject the headers argument: retry without it.
+        if errorResponse then pcall(function() errorResponse.close() end) end
+        requestOk, response, requestError, errorResponse = pcall(http.get, url)
+    end
+    if not requestOk then return nil, tostring(response) end
+    if not response then
+        if errorResponse then pcall(function() errorResponse.close() end) end
+        return nil, requestError or "request failed"
+    end
+    local responseCode = response.getResponseCode()
+    local source = response.readAll()
+    pcall(function() response.close() end)
+    if responseCode ~= 200 then
+        return nil, label .. " returned HTTP " .. tostring(responseCode)
+    end
+    if not source or #source == 0 then return nil, label .. " returned an empty file" end
+    return source
+end
+
+local function installerSources()
+    local sources = {}
+    local base = siteProgramBase()
+    if base then sources[#sources + 1] = { url = base .. "/installer.lua", label = "Site mirror" } end
+    sources[#sources + 1] = { url = GITHUB_INSTALLER_URL, label = "GitHub" }
+    return sources
+end
+
 local function downloadMissingInstaller()
     if fs.exists(installerPath) then return true end
     if not http then return false, "HTTP API is disabled" end
 
     print("Installer is missing; downloading it...")
-    local requestOk, response, requestError, errorResponse = pcall(http.get, INSTALLER_URL, {
-        ["Cache-Control"] = "no-cache",
-    })
-    if not requestOk then return false, tostring(response) end
-    if not response then
-        if errorResponse then errorResponse.close() end
-        return false, requestError or "request failed"
+    local source, lastError = nil, nil
+    for _, candidate in ipairs(installerSources()) do
+        source, lastError = fetchSource(candidate.url, candidate.label)
+        if source then
+            print("Source: " .. candidate.label)
+            break
+        end
+        print("  " .. candidate.label .. ": " .. tostring(lastError))
     end
-
-    local responseCode = response.getResponseCode()
-    local source = response.readAll()
-    response.close()
-    if responseCode ~= 200 then
-        return false, "GitHub returned HTTP " .. tostring(responseCode)
-    end
-    if not source or #source == 0 then return false, "GitHub returned an empty file" end
+    if not source then return false, lastError or "all sources failed" end
 
     local compiled, syntaxError = load(source, "@installer.lua")
     if not compiled then return false, "Lua syntax error: " .. tostring(syntaxError) end

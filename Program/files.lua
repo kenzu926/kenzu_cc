@@ -39,6 +39,12 @@ local function reply(requestId, op, ok, extra)
     server:send(response)
 end
 
+-- Files holding the master token are never exposed remotely.
+local function isProtected(relative)
+    local lower = tostring(relative or ""):lower()
+    return lower == "server.settings" or lower:match("%.token$") ~= nil
+end
+
 local function handleList(message)
     local path, relative = resolvePath(message.path)
     if not fs.exists(path) then
@@ -54,13 +60,15 @@ local function handleList(message)
     local entries = {}
     for _, name in ipairs(names) do
         if #entries >= MAX_ENTRIES then break end
-        local full = fs.combine(path, name)
-        local isDir = fs.isDir(full)
-        entries[#entries + 1] = {
-            name = name,
-            isDir = isDir,
-            size = isDir and 0 or fs.getSize(full),
-        }
+        if not isProtected(name) then
+            local full = fs.combine(path, name)
+            local isDir = fs.isDir(full)
+            entries[#entries + 1] = {
+                name = name,
+                isDir = isDir,
+                size = isDir and 0 or fs.getSize(full),
+            }
+        end
     end
     reply(message.requestId, "file_list", true, {
         path = relative,
@@ -71,6 +79,10 @@ end
 
 local function handleRead(message)
     local path, relative = resolvePath(message.path)
+    if isProtected(relative) then
+        reply(message.requestId, "file_read", false, { error = "Protected file" })
+        return
+    end
     if not fs.exists(path) then
         reply(message.requestId, "file_read", false, { error = "Not found: " .. relative })
         return

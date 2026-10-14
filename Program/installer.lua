@@ -4,8 +4,30 @@
 
 local arguments = { ... }
 
-local REPOSITORY_BASE_URL =
+local GITHUB_BASE_URL =
     "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Program/"
+
+-- Sources are tried in order: the site mirror first (direct updates without
+-- GitHub), then GitHub as a fallback. The site base is derived from the
+-- WebSocket URL passed as argument 1 (same host:port, http(s) scheme).
+local function sourceBases()
+    local bases = {}
+    local serverUrl = tostring(arguments[1] or "")
+    local host = serverUrl:match("^wss?://([^/]+)")
+    if host and host ~= "" then
+        local scheme = serverUrl:sub(1, 3) == "wss" and "https://" or "http://"
+        bases[#bases + 1] = { url = scheme .. host .. "/program/", label = "Site mirror" }
+    end
+    bases[#bases + 1] = { url = GITHUB_BASE_URL, label = "GitHub" }
+    return bases
+end
+
+local function authHeaders()
+    local token = tostring(arguments[2] or "")
+    local headers = { ["Cache-Control"] = "no-cache" }
+    if token ~= "" then headers.Authorization = "Bearer " .. token end
+    return headers
+end
 
 local FILES = {
     "installer.lua",
@@ -56,45 +78,46 @@ local function cleanTemporaryFiles()
 end
 
 local function download(fileName)
-    local url = REPOSITORY_BASE_URL .. fileName
-    local response, requestError, errorResponse = http.get(url, {
-        ["Cache-Control"] = "no-cache",
-    })
-
-    if not response then
-        if errorResponse then
-            errorResponse.close()
+    local lastError = nil
+    for _, base in ipairs(sourceBases()) do
+        local url = base.url .. fileName
+        local requestOk, response, requestError, errorResponse =
+            pcall(http.get, url, authHeaders())
+        if not requestOk or not response then
+            if errorResponse then pcall(function() errorResponse.close() end) end
+            requestOk, response, requestError, errorResponse = pcall(http.get, url)
         end
-        return false, requestError or "request failed"
+        if not requestOk then
+            lastError = tostring(response)
+        elseif not response then
+            if errorResponse then pcall(function() errorResponse.close() end) end
+            lastError = requestError or "request failed"
+        else
+            local responseCode = response.getResponseCode()
+            local source = response.readAll()
+            pcall(function() response.close() end)
+            if responseCode ~= 200 then
+                lastError = base.label .. " returned HTTP " .. tostring(responseCode)
+            elseif not source or #source == 0 then
+                lastError = base.label .. " returned an empty file"
+            else
+                local compiled, syntaxError = load(source, "@" .. fileName)
+                if not compiled then
+                    return false, "Lua syntax error: " .. tostring(syntaxError)
+                end
+                local temporaryPath = installPath(fileName) .. ".download"
+                removeIfPresent(temporaryPath)
+                local output, openError = fs.open(temporaryPath, "w")
+                if not output then
+                    return false, openError or "cannot create temporary file"
+                end
+                output.write(source)
+                output.close()
+                return true
+            end
+        end
     end
-
-    local responseCode = response.getResponseCode()
-    local source = response.readAll()
-    response.close()
-
-    if responseCode ~= 200 then
-        return false, "GitHub returned HTTP " .. tostring(responseCode)
-    end
-    if not source or #source == 0 then
-        return false, "GitHub returned an empty file"
-    end
-
-    local compiled, syntaxError = load(source, "@" .. fileName)
-    if not compiled then
-        return false, "Lua syntax error: " .. tostring(syntaxError)
-    end
-
-    local temporaryPath = installPath(fileName) .. ".download"
-    removeIfPresent(temporaryPath)
-
-    local output, openError = fs.open(temporaryPath, "w")
-    if not output then
-        return false, openError or "cannot create temporary file"
-    end
-
-    output.write(source)
-    output.close()
-    return true
+    return false, lastError or "all sources failed"
 end
 
 local originalExisted = {}

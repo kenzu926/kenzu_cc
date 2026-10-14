@@ -9,6 +9,33 @@ local scriptDirectory = fs.getDir(shell.getRunningProgram())
 local WebSocketClient = dofile(fs.combine(scriptDirectory, "ws_client.lua"))
 local server = WebSocketClient.new("gateway")
 local services = {}
+local updatePath = fs.combine(scriptDirectory, "update.lua")
+local handledUpdates = {}
+local UPDATE_TTL_MS = 10 * 60 * 1000
+
+local function purgeUpdates(now)
+    for requestId, receivedAt in pairs(handledUpdates) do
+        if now - receivedAt > UPDATE_TTL_MS then handledUpdates[requestId] = nil end
+    end
+end
+
+-- Remote update trigger from the website (one per computer: the gateway owns
+-- the only(real) WebSocket, so this cannot double-fire per service).
+local function handleUpdateNow(message)
+    local requestId = tostring(message.requestId or "")
+    if requestId == "" or not fs.exists(updatePath) then return end
+    local now = os.epoch("utc")
+    purgeUpdates(now)
+    if handledUpdates[requestId] then return end
+    handledUpdates[requestId] = now
+    print("Remote update accepted: " .. requestId)
+    if multishell and shell.openTab then
+        local tabId = shell.openTab(updatePath, "--remote", requestId)
+        if tabId then pcall(multishell.setTitle, tabId, "Updating") end
+    else
+        shell.run(updatePath, "--remote", requestId)
+    end
+end
 
 local function serviceList()
     local result = {}
@@ -66,7 +93,12 @@ while true do
         broadcastStatus()
         drawStatus()
     elseif serverEvent == "message" and type(message) == "table" then
-        os.queueEvent(MESSAGE_EVENT, message.targetService or "*", message)
+        if message.type == "update_now" and message.targetService == nil then
+            handleUpdateNow(message)
+            drawStatus()
+        else
+            os.queueEvent(MESSAGE_EVENT, message.targetService or "*", message)
+        end
     end
 
     if event == REGISTER_EVENT and type(arg1) == "string" then

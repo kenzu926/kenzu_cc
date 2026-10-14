@@ -41,42 +41,108 @@ local function safeNumber(device, methodName, fallback)
     return tonumber(value) or fallback or 0
 end
 
-local function probeExtra(device, candidates, limit)
+-- Generic getter probing: calls every no-arg get*/is*/has* method and keeps
+-- numbers, booleans and short strings. Setters (set*) and actions (scram,
+-- activate, ...) are never called, so probing is side-effect free.
+-- Returns map methodName -> value plus normalized lookup.
+local function probeGetters(device, peripheralName, limit)
+    local probed, order, seen = {}, {}, {}
+    if type(device) ~= "table" then return probed, order end
+    local candidates = {}
+    local methodsOk, methods = pcall(peripheral.getMethods, peripheralName)
+    if methodsOk and type(methods) == "table" then
+        for _, methodName in ipairs(methods) do
+            candidates[#candidates + 1] = methodName
+        end
+    end
+    -- Fallback: some modded peripherals fail getMethods by network name;
+    -- their method table itself is still enumerable.
+    local pairsOk, pairKeys = pcall(function()
+        local keys = {}
+        for key, value in pairs(device) do
+            if type(key) == "string" and type(value) == "function" then
+                keys[#keys + 1] = key
+            end
+        end
+        return keys
+    end)
+    if pairsOk and type(pairKeys) == "table" then
+        for _, methodName in ipairs(pairKeys) do
+            candidates[#candidates + 1] = methodName
+        end
+    end
+    for _, methodName in ipairs(candidates) do
+        if #order >= (limit or 24) then break end
+        if type(methodName) == "string" and not seen[methodName]
+            and (methodName:sub(1, 3) == "get"
+                or methodName:sub(1, 2) == "is"
+                or methodName:sub(1, 3) == "has") then
+            seen[methodName] = true
+            local method = device[methodName]
+            if type(method) == "function" then
+                local ok, value = pcall(method)
+                if ok then
+                    if type(value) == "table" then value = value.amount or value[1] end
+                    if type(value) == "number" and value == value then
+                        probed[methodName] = value
+                        order[#order + 1] = methodName
+                    elseif type(value) == "boolean" then
+                        probed[methodName] = value
+                        order[#order + 1] = methodName
+                    elseif type(value) == "string" and #value <= 48 then
+                        probed[methodName] = value
+                        order[#order + 1] = methodName
+                    end
+                end
+            end
+        end
+    end
+    return probed, order
+end
+
+local function normName(methodName)
+    return tostring(methodName or ""):lower()
+end
+
+-- First probe entry whose normalized name contains one of the keywords.
+local function pickNumber(probed, order, keywords)
+    for _, keyword in ipairs(keywords) do
+        for _, methodName in ipairs(order) do
+            if normName(methodName):find(keyword, 1, true) then
+                local value = tonumber(probed[methodName])
+                if value ~= nil then return value, methodName end
+            end
+        end
+    end
+    return 0, nil
+end
+
+-- Mekanism filled percentages are 0..1 fractions; plain counters are not.
+local function asPercent(value)
+    value = tonumber(value) or 0
+    if value > 0 and value <= 1 then return value * 100 end
+    return value
+end
+
+-- Builds the extra map from an already probed table, skipping used keys.
+local function probeExtraFiltered(probed, order, used, limit)
     local extra = {}
     local count = 0
-    for _, methodName in ipairs(candidates) do
+    for _, methodName in ipairs(order) do
         if count >= (limit or 12) then break end
-        local method = device and device[methodName]
-        if type(method) == "function" then
-            local ok, value = pcall(method)
-            if ok then
-                if type(value) == "table" then value = value.amount or value[1] end
-                if type(value) == "number" or type(value) == "boolean" then
-                    extra[methodName] = value
-                    count = count + 1
-                elseif tonumber(value) ~= nil then
-                    extra[methodName] = tonumber(value)
-                    count = count + 1
-                end
+        if not used[methodName] then
+            local value = probed[methodName]
+            if type(value) == "number" or type(value) == "boolean" then
+                extra[methodName] = value
+                count = count + 1
+            elseif type(value) == "string" and #value <= 48 then
+                extra[methodName] = value
+                count = count + 1
             end
         end
     end
     return extra
 end
-
-local BOILER_EXTRA = {
-    "getHeatedCoolantFilledPercentage", "getCoolantFilledPercentage",
-    "getBoilRate", "getMaxBoilRate", "getTemperature",
-    "getEnvironmentalLoss", "getWater", "getWaterCapacity",
-    "getSteam", "getSteamCapacity",
-}
-
-local FUSION_EXTRA = {
-    "getMinInjectionRate", "getMaxInjectionRate",
-    "getDeuteriumFilledPercentage", "getTritiumFilledPercentage",
-    "getDTFuelFilledPercentage", "getWaterFilledPercentage",
-    "getSteamFilledPercentage",
-}
 
 local function readEnergyUnit(entry)
     local device = entry.device
@@ -98,6 +164,23 @@ local function readEnergyUnit(entry)
     local input = safeNumber(device, "getTransferRate")
     if input == 0 then input = safeNumber(device, "getLastInput") end
     local output = safeNumber(device, "getLastOutput")
+    if stored == 0 and capacity == 0 then
+        -- Unknown energy peripheral: pick by method-name substrings.
+        local probed, order = probeGetters(device, entry.name, 24)
+        if stored == 0 then
+            stored = pickNumber(probed, order, { "energystored", "storedenergy", "stored" })
+        end
+        if capacity == 0 then
+            capacity = pickNumber(probed, order,
+                { "maxenergystored", "maxstored", "maxenergy", "capacity" })
+        end
+        if input == 0 then
+            input = pickNumber(probed, order, { "transferrate", "transfer", "input" })
+        end
+        if output == 0 then
+            output = pickNumber(probed, order, { "output" })
+        end
+    end
     local energyPercent = 0
     if capacity > 0 then energyPercent = stored / capacity * 100 end
     return {
@@ -113,22 +196,65 @@ end
 
 local function readBoiler(entry)
     local device = entry.device
+    local probed, order = probeGetters(device, entry.name, 24)
+    local used = {}
+    local waterPercent = 0
+    if device and device.getWaterFilledPercentage then
+        waterPercent = safeNumber(device, "getWaterFilledPercentage") * 100
+        used.getWaterFilledPercentage = true
+    else
+        local value, key = pickNumber(probed, order, { "waterfilled", "water" })
+        waterPercent = asPercent(value)
+        if key then used[key] = true end
+    end
+    local steamPercent = 0
+    if device and device.getSteamFilledPercentage then
+        steamPercent = safeNumber(device, "getSteamFilledPercentage") * 100
+        used.getSteamFilledPercentage = true
+    else
+        local value, key = pickNumber(probed, order, { "steamfilled", "steam" })
+        steamPercent = asPercent(value)
+        if key then used[key] = true end
+    end
     return {
         peripheral = entry.name,
-        waterPercent = safeNumber(device, "getWaterFilledPercentage") * 100,
-        steamPercent = safeNumber(device, "getSteamFilledPercentage") * 100,
-        extra = probeExtra(device, BOILER_EXTRA, 12),
+        waterPercent = waterPercent,
+        steamPercent = steamPercent,
+        extra = probeExtraFiltered(probed, order, used, 12),
     }
 end
 
 local function readFusion(entry)
     local device = entry.device
+    local probed, order = probeGetters(device, entry.name, 24)
+    local used = {}
+    local plasmaTemp, plasmaKey = pickNumber(probed, order,
+        { "plasmatemperature", "plasmatemp", "plasma" })
+    if plasmaKey then used[plasmaKey] = true end
+    if plasmaTemp == 0 and device and device.getPlasmaTemperature then
+        plasmaTemp = safeNumber(device, "getPlasmaTemperature")
+        used.getPlasmaTemperature = true
+    end
+    local caseTemp, caseKey = pickNumber(probed, order,
+        { "casetemperature", "casetemp", "case" })
+    if caseKey then used[caseKey] = true end
+    if caseTemp == 0 and device and device.getCaseTemperature then
+        caseTemp = safeNumber(device, "getCaseTemperature")
+        used.getCaseTemperature = true
+    end
+    local injectionRate, injKey = pickNumber(probed, order,
+        { "injectionrate", "inject" })
+    if injKey then used[injKey] = true end
+    if injectionRate == 0 and device and device.getInjectionRate then
+        injectionRate = safeNumber(device, "getInjectionRate")
+        used.getInjectionRate = true
+    end
     return {
         peripheral = entry.name,
-        plasmaTemp = safeNumber(device, "getPlasmaTemperature"),
-        caseTemp = safeNumber(device, "getCaseTemperature"),
-        injectionRate = safeNumber(device, "getInjectionRate"),
-        extra = probeExtra(device, FUSION_EXTRA, 12),
+        plasmaTemp = plasmaTemp,
+        caseTemp = caseTemp,
+        injectionRate = injectionRate,
+        extra = probeExtraFiltered(probed, order, used, 12),
     }
 end
 
@@ -167,9 +293,13 @@ local function statusText(energyUnits, boilers, fusion)
             boiler.peripheral, boiler.waterPercent, boiler.steamPercent)
     end
     for _, reactor in ipairs(fusion) do
-        lines[#lines + 1] = ("  fusion %s: plasma %.0f K case %.0f K inj %s"):format(
+        local extraCount = 0
+        if type(reactor.extra) == "table" then
+            for _ in pairs(reactor.extra) do extraCount = extraCount + 1 end
+        end
+        lines[#lines + 1] = ("  fusion %s: plasma %.0f K case %.0f K inj %s (+%d)"):format(
             reactor.peripheral, reactor.plasmaTemp, reactor.caseTemp,
-            tostring(reactor.injectionRate))
+            tostring(reactor.injectionRate), extraCount)
     end
     lines[#lines + 1] = "Gateway: " .. (server:isConnected() and "CONNECTED" or "OFFLINE")
     return table.concat(lines, "\n")

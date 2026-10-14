@@ -29,17 +29,10 @@ local function reactorIsReady()
     return false
 end
 
+-- Machines telemetry discovers boilers/fusion/storages at runtime (on every
+-- peripheral event), so it is never skipped: an empty scan just sends nothing.
 local function machinesIsReady()
-    if Peripherals then
-        local okBoilers, boilers = pcall(Peripherals.findBoilers)
-        if okBoilers and type(boilers) == "table" and #boilers > 0 then return true end
-        local okFusion, fusion = pcall(Peripherals.findFusionReactors)
-        if okFusion and type(fusion) == "table" and #fusion > 0 then return true end
-        local okEnergy, storages = pcall(Peripherals.findEnergyStorages)
-        if okEnergy and type(storages) == "table" and #storages > 0 then return true end
-        return false
-    end
-    return false
+    return true
 end
 
 local function meNodeIsReady()
@@ -68,24 +61,9 @@ local function plansMonitorIsReady()
 end
 
 local function overviewRelayIsReady()
-    if peripheral.isPresent("inductionPort_0")
-        or peripheral.isPresent("fissionReactorLogicAdapter_0")
-        or turbineIsReady() then
-        return true
-    end
-    if Peripherals then
-        local okBoilers, boilers = pcall(Peripherals.findBoilers)
-        if okBoilers and type(boilers) == "table" and #boilers > 0 then return true end
-        local okFusion, fusion = pcall(Peripherals.findFusionReactors)
-        if okFusion and type(fusion) == "table" and #fusion > 0 then return true end
-        local okEnergy, storages = pcall(Peripherals.findEnergyStorages)
-        if okEnergy and type(storages) == "table" then
-            for _, entry in ipairs(storages) do
-                if entry.kind == "draconic" or entry.kind == "other" then return true end
-            end
-        end
-    end
-    return false
+    -- Relay scans everything at runtime and works without a modem
+    -- (rednet part is skipped then), so it is never skipped either.
+    return true
 end
 
 local function anyMonitorPresent()

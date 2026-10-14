@@ -100,7 +100,16 @@ if command == "test" then
     for _, entry in ipairs(boilers) do print("  - " .. entry.name) end
     local fusion = Peripherals.findFusionReactors()
     print("fusion: " .. #fusion .. " (pattern '" .. Peripherals.fusionPattern() .. "')")
-    for _, entry in ipairs(fusion) do print("  - " .. entry.name) end
+    for _, entry in ipairs(fusion) do
+        local suffix = ""
+        local methodsOk, methods = pcall(peripheral.getMethods, entry.name)
+        if methodsOk and type(methods) == "table" then
+            suffix = (" [methods: %d]"):format(#methods)
+        else
+            suffix = " [methods unreadable]"
+        end
+        print("  - " .. entry.name .. suffix)
+    end
     local storages = Peripherals.findEnergyStorages()
     local draconic = 0
     for _, entry in ipairs(storages) do
@@ -115,6 +124,20 @@ if command == "test" then
         local device, name = Peripherals.wrap(key)
         print(key .. ": " .. tostring(name) .. (device and " OK" or " MISSING"))
     end
+    local modems, wireless = {}, {}
+    for _, name in ipairs(peripheral.getNames()) do
+        local ok, isModem = pcall(peripheral.hasType, name, "modem")
+        if ok and isModem then
+            modems[#modems + 1] = name
+            local modem = peripheral.wrap(name)
+            if modem and modem.isWireless then
+                local wirelessOk, isWireless = pcall(modem.isWireless)
+                if wirelessOk and isWireless then wireless[#wireless + 1] = name end
+            end
+        end
+    end
+    print("modems: " .. #modems .. " total, " .. #wireless .. " wireless")
+    for _, name in ipairs(modems) do print("  - " .. name) end
     return
 end
 

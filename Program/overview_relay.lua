@@ -21,7 +21,12 @@ local function openWirelessModem()
     end
 end
 
-local modemName = assert(openWirelessModem(), "Wireless modem not found")
+-- No modem is fine: rednet relay is skipped, local scans still run.
+-- (The website gets the same data over the gateway anyway.)
+local modemName = openWirelessModem()
+if modemName == nil then
+    print("Overview telemetry relay: no wireless modem, rednet disabled")
+end
 
 local function raw(device, method)
     if not device or not device[method] then return nil end
@@ -217,11 +222,13 @@ end
 
 local function sendSnapshot()
     local snapshot = readSnapshot()
-    rednet.broadcast(snapshot, SNAPSHOT_PROTOCOL)
+    if modemName then
+        pcall(rednet.broadcast, snapshot, SNAPSHOT_PROTOCOL)
+    end
     term.clear()
     term.setCursorPos(1, 1)
     print("Overview telemetry relay")
-    print("Modem: " .. modemName)
+    print("Modem: " .. tostring(modemName or "NOT FOUND (rednet off)"))
     print("Matrix: " .. (snapshot.matrix and "CONNECTED" or "OFFLINE"))
     print("Reactor: " .. (snapshot.reactor and ("CONNECTED x" .. #snapshot.reactors) or "OFFLINE"))
     print("Turbines: " .. #snapshot.turbines)

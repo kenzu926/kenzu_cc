@@ -429,6 +429,7 @@ end
 
 function Peripherals.isFusion(peripheralName, device)
     if type(peripheralName) ~= "string" then return false end
+    if hasTypeSafe(peripheralName, "fusionReactorLogicAdapter") then return true end
     if device ~= nil and device.getPlasmaTemperature ~= nil then return true end
     if device == nil then
         local wrapOk, wrapped = pcall(peripheral.wrap, peripheralName)

@@ -449,13 +449,31 @@ local function normalizeTurbine(raw, index, sender)
     }
 end
 
+-- Substring fallback inside the generic extra map (machines.lua probes every
+-- getter, so differently named Mekanism methods still resolve by meaning).
+local function extraNumber(raw, keywords)
+    if type(raw) ~= "table" or type(raw.extra) ~= "table" then return nil end
+    for _, keyword in ipairs(keywords) do
+        for key, value in pairs(raw.extra) do
+            if tostring(key):lower():find(keyword, 1, true) then
+                local number = tonumber(value)
+                if number ~= nil then return number end
+            end
+        end
+    end
+    return nil
+end
+
 local function normalizeFusion(raw, index, sender)
     if type(raw) ~= "table" then return nil end
     return {
         name = tostring(raw.name or raw.peripheral or ("FUSION " .. tostring(index or sender))),
-        plasmaTemp = firstNumber(raw, { "plasmaTemp", "plasmaTemperature", "plasma" }) or 0,
-        caseTemp = firstNumber(raw, { "caseTemp", "caseTemperature", "case", "temperature", "temp" }) or 0,
-        injectionRate = firstNumber(raw, { "injectionRate", "injection", "fuelRate" }),
+        plasmaTemp = firstNumber(raw, { "plasmaTemp", "plasmaTemperature", "plasma" })
+            or extraNumber(raw, { "plasma" }) or 0,
+        caseTemp = firstNumber(raw, { "caseTemp", "caseTemperature", "case", "temperature", "temp" })
+            or extraNumber(raw, { "case" }) or 0,
+        injectionRate = firstNumber(raw, { "injectionRate", "injection", "fuelRate" })
+            or extraNumber(raw, { "inject" }),
     }
 end
 
