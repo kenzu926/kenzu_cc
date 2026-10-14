@@ -27,6 +27,9 @@ reboot
 `startup` launches: Gateway, Draconic (controller), Monitor Relay (if a monitor
 is present), Files.
 
+Updates come from the site mirror first (`/program`, tab «Обновление» —
+publish `draconic_reactor.lua` etc. there), GitHub is only a fallback.
+
 ## Monitor UI (3x3, touch)
 
 - Tab **STATUS**: state, generation RF/t, temperature, saturation / field /
@@ -65,3 +68,12 @@ names explicitly — either in `draconic.settings` or via the website Files tab.
   After big shared changes, re-copy them manually.
 - Telemetry role `draconic` (`draconic_status`) is accepted by the site gateway;
   website widgets are a future step.
+
+## Standalone HTTP API (no main PCs involved)
+
+- `GET /draconic` (scope `read`) — last known `{ online, lastSeen, computerId, data }`.
+- `POST /draconic/command` (scope `operate`) — `{ type, value? }`:
+  - `draconic.charge` / `draconic.stop` / `draconic.start`
+  - `draconic.setTarget` with `value` 10..95 (target field %)
+- Answers `202 { ok:true }` while the draconic computer is online, else `503`.
+  The computer confirms via `command_result` (visible in the website event feed).

@@ -332,6 +332,64 @@ local function sendStatus()
     server:send({ type = "draconic_status", data = data })
 end
 
+local function sendCommandResult(command, ok, resultMessage)
+    server:send({
+        type = "command_result",
+        requestId = command.requestId,
+        ok = ok,
+        message = resultMessage,
+    })
+end
+
+local function handleServerCommand(command)
+    if command.action == "draconic_charge" then
+        if reactor and reactor.chargeReactor then
+            local ok, err = pcall(reactor.chargeReactor)
+            message = ok and "Charge requested from web" or "Charge failed: " .. tostring(err)
+            sendCommandResult(command, ok, message)
+        else
+            sendCommandResult(command, false, "Reactor unavailable")
+        end
+        return
+    end
+    if command.action == "draconic_stop" then
+        if reactor and reactor.stopReactor then
+            local ok, err = pcall(reactor.stopReactor)
+            emergencyCharge, emergencyTemp = false, false
+            action = "Stopped from web"
+            message = ok and action or "Stop failed: " .. tostring(err)
+            saveSettings()
+            sendCommandResult(command, ok, message)
+        else
+            sendCommandResult(command, false, "Reactor unavailable")
+        end
+        return
+    end
+    if command.action == "draconic_start" then
+        if reactor and reactor.activateReactor then
+            local ok, err = pcall(reactor.activateReactor)
+            message = ok and "Started from web" or "Start failed: " .. tostring(err)
+            sendCommandResult(command, ok, message)
+        else
+            sendCommandResult(command, false, "Reactor unavailable")
+        end
+        return
+    end
+    if command.action == "draconic_set_target" then
+        local value = tonumber(command.target)
+        if not value or value < 10 or value > 95 then
+            sendCommandResult(command, false, "Target must be 10..95")
+            return
+        end
+        targetStrength = math.floor(value)
+        saveSettings()
+        message = ("Target field set to %d%% from web"):format(targetStrength)
+        sendCommandResult(command, true, message)
+        return
+    end
+    sendCommandResult(command, false, "Unknown draconic command")
+end
+
 local function consoleStatus()
     local lines = {
         "Service: draconic reactor controller",
@@ -631,7 +689,12 @@ while true do
         message = "Web server disconnected"
         draw()
     elseif serverEvent == "message" and type(serverMessage) == "table" then
-        if serverMessage.type == "console_command"
+        if serverMessage.type == "command" then
+            handleServerCommand(serverMessage)
+            updateController()
+            sendStatus()
+            draw()
+        elseif serverMessage.type == "console_command"
             and (serverMessage.target == "draconic"
                 or serverMessage.target == tostring(os.getComputerID())) then
             local ok, output = SafeConsole.execute(serverMessage.command, consoleStatus)

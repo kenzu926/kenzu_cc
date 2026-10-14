@@ -6,8 +6,31 @@
 -- big shared updates. draconic_reactor.lua itself is independent.
 local arguments = { ... }
 
-local REPOSITORY_BASE_URL =
+local GITHUB_BASE_URL =
     "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Draconic/"
+
+-- Sources are tried in order: the site mirror first (direct updates without
+-- GitHub; files are published there by name, same flat namespace as Program/),
+-- then GitHub as a fallback. The site base is derived from the WebSocket URL
+-- passed as argument 1 (same host:port, http(s) scheme).
+local function sourceBases()
+    local bases = {}
+    local serverUrl = tostring(arguments[1] or "")
+    local host = serverUrl:match("^wss?://([^/]+)")
+    if host and host ~= "" then
+        local scheme = serverUrl:sub(1, 3) == "wss" and "https://" or "http://"
+        bases[#bases + 1] = { url = scheme .. host .. "/program/", label = "Site mirror" }
+    end
+    bases[#bases + 1] = { url = GITHUB_BASE_URL, label = "GitHub" }
+    return bases
+end
+
+local function authHeaders()
+    local token = tostring(arguments[2] or "")
+    local headers = { ["Cache-Control"] = "no-cache" }
+    if token ~= "" then headers.Authorization = "Bearer " .. token end
+    return headers
+end
 
 local FILES = {
     "installer.lua",
@@ -43,17 +66,36 @@ end
 print("Downloading draconic controller...")
 for _, fileName in ipairs(FILES) do
     write("  " .. fileName .. "... ")
-    local response, requestError, errorResponse = http.get(
-        REPOSITORY_BASE_URL .. fileName, { ["Cache-Control"] = "no-cache" })
-    if not response then
-        if errorResponse then errorResponse.close() end
-        printError("FAILED: " .. tostring(requestError))
-        return
+    local source, lastError = nil, nil
+    for _, base in ipairs(sourceBases()) do
+        local url = base.url .. fileName
+        local requestOk, response, requestError, errorResponse =
+            pcall(http.get, url, authHeaders())
+        if not requestOk or not response then
+            if errorResponse then pcall(function() errorResponse.close() end) end
+            requestOk, response, requestError, errorResponse = pcall(http.get, url)
+        end
+        if not requestOk then
+            lastError = tostring(response)
+        elseif not response then
+            if errorResponse then pcall(function() errorResponse.close() end) end
+            lastError = requestError or "request failed"
+        else
+            local responseCode = response.getResponseCode()
+            local body = response.readAll()
+            pcall(function() response.close() end)
+            if responseCode ~= 200 then
+                lastError = base.label .. " HTTP " .. tostring(responseCode)
+            elseif not body or #body == 0 then
+                lastError = base.label .. " empty file"
+            else
+                source = body
+                break
+            end
+        end
     end
-    local source = response.readAll()
-    response.close()
-    if not source or #source == 0 then
-        printError("FAILED: empty file")
+    if not source then
+        printError("FAILED: " .. tostring(lastError))
         return
     end
     local compiled, syntaxError = load(source, "@" .. fileName)
