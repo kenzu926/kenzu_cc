@@ -9,17 +9,21 @@ local arguments = { ... }
 local GITHUB_BASE_URL =
     "https://raw.githubusercontent.com/kenzu926/kenzu_cc/refs/heads/main/Draconic/"
 
--- Sources are tried in order: the site mirror first (direct updates without
--- GitHub; files are published there by name, same flat namespace as Program/),
--- then GitHub as a fallback. The site base is derived from the WebSocket URL
--- passed as argument 1 (same host:port, http(s) scheme).
-local function sourceBases()
+-- Sources are tried in order. Boot files (installer/startup/update) ALWAYS come
+-- from GitHub Draconic/: the flat site mirror shares those filenames with the
+-- main Program/ set, so the mirror would serve the wrong content for them.
+-- Everything else tries the site mirror first, then GitHub Draconic/.
+local BOOT_FILES = { ["installer.lua"] = true, ["startup.lua"] = true, ["update.lua"] = true }
+
+local function sourceBases(fileName)
     local bases = {}
-    local serverUrl = tostring(arguments[1] or "")
-    local host = serverUrl:match("^wss?://([^/]+)")
-    if host and host ~= "" then
-        local scheme = serverUrl:sub(1, 3) == "wss" and "https://" or "http://"
-        bases[#bases + 1] = { url = scheme .. host .. "/program/", label = "Site mirror" }
+    if not BOOT_FILES[fileName] then
+        local serverUrl = tostring(arguments[1] or "")
+        local host = serverUrl:match("^wss?://([^/]+)")
+        if host and host ~= "" then
+            local scheme = serverUrl:sub(1, 3) == "wss" and "https://" or "http://"
+            bases[#bases + 1] = { url = scheme .. host .. "/program/", label = "Site mirror" }
+        end
     end
     bases[#bases + 1] = { url = GITHUB_BASE_URL, label = "GitHub" }
     return bases
@@ -34,6 +38,7 @@ end
 
 local FILES = {
     "installer.lua",
+    "update.lua",
     "startup.lua",
     "ws_client.lua",
     "gateway_client.lua",
@@ -67,7 +72,7 @@ print("Downloading draconic controller...")
 for _, fileName in ipairs(FILES) do
     write("  " .. fileName .. "... ")
     local source, lastError = nil, nil
-    for _, base in ipairs(sourceBases()) do
+    for _, base in ipairs(sourceBases(fileName)) do
         local url = base.url .. fileName
         local requestOk, response, requestError, errorResponse =
             pcall(http.get, url, authHeaders())

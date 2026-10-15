@@ -28,7 +28,18 @@ reboot
 is present), Files.
 
 Updates come from the site mirror first (`/program`, tab «Обновление» —
-publish `draconic_reactor.lua` etc. there), GitHub is only a fallback.
+publish `draconic_reactor.lua` etc. there; names don't collide with `Program/`),
+GitHub is only a fallback. Bootstrapping (`installer.lua`/`startup.lua`/
+`update.lua` themselves) always comes from GitHub, because the flat site mirror
+shares those filenames with the main set. The site «Обновить компьютеры» button
+works here too: the gateway opens `update.lua --remote` in a new tab.
+
+Single `.lua` files (including `draconic_reactor.lua` test builds) can also be
+sent straight to this computer: console tab → «Файлы» → pick Computer 6 →
+upload or edit in place. `server.settings` stays protected.
+
+The monitor binding (`draconic.monitor`, default `monitor_0`) falls back to the
+first attached monitor automatically, so a renamed screen never stays dark.
 
 ## Monitor UI (3x3, touch)
 

@@ -411,6 +411,20 @@ end
 local tab = "status"
 local buttons = {}
 local monitor = Screen.attach(MONITOR_NAME)
+if monitor == nil then
+    -- Configured monitor missing (e.g. renamed wiring): fall back to the
+    -- first attached monitor so the UI never stays dark silently.
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.hasType then
+            local ok, isMonitor = pcall(peripheral.hasType, name, "monitor")
+            if ok and isMonitor then
+                MONITOR_NAME = name
+                monitor = Screen.attach(name)
+                break
+            end
+        end
+    end
+end
 if monitor then pcall(monitor.setTextScale, 0.5) end
 
 local function text(x, y, value, color, background)
